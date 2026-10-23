@@ -154,3 +154,19 @@ test("reload keeps the current roster when the file is mid-write / corrupt", () 
   expect(reg.has("PUBA")).toBe(true);
   rmSync(dir, { recursive: true, force: true });
 });
+
+test("touch merges the file first: a CLI removal is not written back and is reported", () => {
+  const file = join(tmpDir(), "devices.json");
+  const resident = loadDeviceRegistry(file);
+  resident.add("PUBX", "phone");
+  resident.add("PUBY", "tablet");
+  const dropped: string[][] = [];
+  resident.onExternalRemove((p) => dropped.push(p));
+
+  loadDeviceRegistry(file).remove("PUBX");
+  resident.touch("PUBX", "6.6.6.6"); // thief reconnecting before the next poll
+
+  expect(JSON.parse(readFileSync(file, "utf8")).devices.map((d: any) => d.pubKey)).toEqual(["PUBY"]);
+  expect(resident.has("PUBX")).toBe(false);
+  expect(dropped).toEqual([["PUBX"]]);
+});

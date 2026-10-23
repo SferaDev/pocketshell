@@ -20,6 +20,8 @@ export interface DeviceRegistry {
    * the object would leave most callers on the stale one.
    */
   reload(): DeviceRecord[];
+  /** Called with keys that a write-path merge found removed on disk by another process. */
+  onExternalRemove(cb: (pubs: string[]) => void): void;
 }
 
 export function loadDeviceRegistry(file: string, now: () => number = () => Date.now()): DeviceRegistry {
@@ -42,17 +44,34 @@ export function loadDeviceRegistry(file: string, now: () => number = () => Date.
     writeFileSync(tmp, JSON.stringify({ v: 1, devices }), { mode: 0o600 });
     renameSync(tmp, file);
   };
+  let dropped: (pubs: string[]) => void = () => {};
+  // Disk is authoritative for membership; memory only contributes lastSeen/lastIp.
+  // Run before every write so a CLI removal is never persisted back.
+  const mergeDisk = () => {
+    const disk = readFromDisk();
+    if (disk === devices) return;
+    const mem = new Map(devices.map((d) => [d.pubKey, d]));
+    const onDisk = new Set(disk.map((d) => d.pubKey));
+    const gone = devices.filter((d) => !onDisk.has(d.pubKey)).map((d) => d.pubKey);
+    devices = disk.map((d) => {
+      const m = mem.get(d.pubKey);
+      return m ? { ...d, lastSeen: m.lastSeen ?? d.lastSeen, lastIp: m.lastIp ?? d.lastIp } : d;
+    });
+    if (gone.length) dropped(gone);
+  };
   const iso = () => new Date(now()).toISOString();
   return {
     list: () => devices.map((d) => ({ ...d })),
     has: (pub) => devices.some((d) => d.pubKey === pub),
     add: (pub, name) => {
+      mergeDisk();
       const ex = devices.find((d) => d.pubKey === pub);
       if (ex) { ex.name = name; }
       else { devices.push({ pubKey: pub, name, addedAt: iso(), lastSeen: null }); }
       persist();
     },
     remove: (pub) => {
+      mergeDisk();
       const n = devices.length;
       devices = devices.filter((d) => d.pubKey !== pub);
       if (devices.length === n) return false;
@@ -60,9 +79,11 @@ export function loadDeviceRegistry(file: string, now: () => number = () => Date.
       return true;
     },
     touch: (pub, ip) => {
+      mergeDisk();
       const d = devices.find((x) => x.pubKey === pub);
       if (d) { d.lastSeen = iso(); if (ip) d.lastIp = ip; persist(); }
     },
+    onExternalRemove: (cb) => { dropped = cb; },
     reload: () => {
       devices = readFromDisk();
       return devices.map((d) => ({ ...d }));

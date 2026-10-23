@@ -146,6 +146,7 @@ export function startServer(deps: Deps = {}) {
     pairingMintedAt = rec.mintedAt ?? Date.now();
   };
   const authorize = (pub: string): "authorized" | "pending" | "reject" => {
+    registryWatch.poll(); // pick up a CLI removal before trusting the in-memory registry
     if (config.registry.has(pub) || envKeys.has(pub)) return "authorized";
     // Admit an unregistered peer to the pending window only while the pairing
     // code is still live (not consumed/expired). Once spent, unregistered peers
@@ -490,6 +491,12 @@ export function startServer(deps: Deps = {}) {
     onRemoved: (pubs) => {
       for (const pub of pubs) revokeEffects(pub, "cli");
     },
+  });
+
+  // touch()/add() merge the file before writing and report removals here, since
+  // the watcher's before/after diff no longer sees keys the registry already dropped.
+  config.registry.onExternalRemove((pubs) => {
+    for (const pub of pubs) revokeEffects(pub, "cli");
   });
 
   const pushSnippets = (target?: Conn) => {

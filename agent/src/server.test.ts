@@ -584,6 +584,36 @@ test("CLI device removal disconnects the live session and de-authorizes it", () 
   rmSync(file, { force: true });
 });
 
+test("touch before the poll does not undo a CLI removal and still kicks the device", () => {
+  const file = tmpRegFile();
+  const registry = loadDeviceRegistry(file);
+  registry.add("B", "victim");
+  registry.add("C", "other");
+  const cfg: any = {
+    identity: { publicKey: new Uint8Array(32), secretKey: new Uint8Array(32) },
+    authorizedKeys: [], replayBufferBytes: 4096,
+    registry, registryFile: file, pairing: null, pairingMode: false,
+    listen: { host: "127.0.0.1", port: 0 }, workspaceRoot: ".", tls: { enabled: false },
+    rateLimiter: noopLimiter(), audit: noopAudit(), keyDir: tmpKeyDir(),
+  };
+  const srv = startServer({ port: 0, config: cfg, channelFactory: stubResponder("B", false) });
+  let bClosed = false;
+  const wsB: any = { sent: [] as Uint8Array[], send(d: any) { this.sent.push(d); }, close() { bClosed = true; } };
+  srv.__test.openWith(wsB, "2.2.2.2", stubResponder("B", false));
+  srv.__test.message(wsB as any, M1);
+
+  loadDeviceRegistry(file).remove("B");
+  registry.touch("C", "3.3.3.3"); // another device's handshake lands before the poll
+  srv.__test.pollRegistry();
+
+  const onDisk = JSON.parse(readFileSync(file, "utf8")).devices.map((d: any) => d.pubKey);
+  expect(onDisk).toEqual(["C"]);
+  expect(registry.has("B")).toBe(false);
+  expect(bClosed).toBe(true);
+  srv.stop();
+  rmSync(file, { force: true });
+});
+
 test("registry watcher does not disturb devices when nobody was removed", () => {
   // touch() rewrites devices.json on every heartbeat. If that read as a
   // revocation, every connected device would be kicked every few seconds.
