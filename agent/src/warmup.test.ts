@@ -20,7 +20,7 @@ test("non-darwin is a full no-op: no probes, no lines", () => {
   expect(tmuxCalled).toBe(false);
 });
 
-test("darwin: probes protected dirs, spawns+kills a scratch tmux session", () => {
+test("darwin: never reads Files and Folders dirs, spawns+kills a scratch tmux session", () => {
   const read: string[] = [];
   const tmuxCalls: string[][] = [];
   const lines = runWarmup({
@@ -29,27 +29,11 @@ test("darwin: probes protected dirs, spawns+kills a scratch tmux session", () =>
     readdir: (p) => { read.push(p); return []; },
     tmux: okTmux(tmuxCalls),
   });
-  expect(read).toContain("/h/Documents");
-  expect(read).toContain("/h/Desktop");
-  expect(read).toContain("/h/Downloads");
-  expect(read).toContain("/h/Library/Safari");
+  expect(read).toEqual(["/h/Library/Safari"]);
   expect(tmuxCalls.some((a) => a[0] === "new-session" && a.includes("-d"))).toBe(true);
   expect(tmuxCalls.some((a) => a[0] === "kill-session")).toBe(true);
   // Safari readable -> FDA present -> no guidance
   expect(lines).toEqual([]);
-});
-
-test("denied dir probes are tolerated silently", () => {
-  const lines = runWarmup({
-    platform: "darwin",
-    home: "/h",
-    readdir: (p) => {
-      if (p.endsWith("Documents")) throw new Error("EPERM");
-      return []; // Desktop/Downloads/Safari fine
-    },
-    tmux: okTmux(),
-  });
-  expect(lines).toEqual([]); // Safari probe passed -> still no guidance
 });
 
 test("failed Safari probe (no FDA) yields manual FDA guidance lines", () => {

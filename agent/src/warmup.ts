@@ -1,8 +1,6 @@
-// macOS TCC warmup (fallback for "grants lost after an update"): probe the
-// protected domains right after startup so any authorization prompts cluster
-// at boot instead of surprising the user mid-task. Every probe is read-only
-// and every failure is silent by design — a denied probe just means macOS
-// already decided (prompt shown or grant denied); we never retry or escalate.
+// macOS warmup: check tmux works under the service manager and detect whether
+// Full Disk Access is granted. It never reads "Files and Folders" TCC domains:
+// under launchd that read blocks the event loop until someone answers a dialog.
 //
 // Platform boundary: only darwin has TCC. On any other platform runWarmup()
 // is a full no-op returning no lines.
@@ -16,9 +14,6 @@ export interface WarmupDeps {
   readdir?: (path: string) => unknown; // throws on denial
   tmux?: (args: string[]) => { exitCode: number };
 }
-
-// "Files and Folders" TCC domains — a read here can raise the grant prompt.
-const TCC_DIRS = ["Documents", "Desktop", "Downloads"] as const;
 
 const defaultTmux = (args: string[]): { exitCode: number } => {
   try {
@@ -37,13 +32,7 @@ export function runWarmup(deps: WarmupDeps = {}): string[] {
   const home = deps.home ?? homedir();
   const readdir = deps.readdir ?? ((p: string) => readdirSync(p));
 
-  for (const d of TCC_DIRS) {
-    try { readdir(`${home}/${d}`); } catch { /* denied/absent — nothing to do */ }
-  }
-
-  // Spawn-and-kill a scratch tmux session: proves tmux works under the
-  // service manager and, when the default cwd sits in a protected folder,
-  // pulls the matching file grant into the same boot-time prompt batch.
+  // Spawn-and-kill a scratch tmux session: proves tmux works under the service manager.
   const tmux = deps.tmux ?? defaultTmux;
   const scratch = `pocketshell-warmup-${process.pid}`;
   if (tmux(["new-session", "-d", "-s", scratch]).exitCode === 0) {
