@@ -1,6 +1,6 @@
 #!/bin/sh
 # PocketShell one-line installer
-#   curl -fsSL https://raw.githubusercontent.com/Big-Pony/pocketshell/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/SferaDev/pocketshell/dev/install.sh | sh
 #   VERSION=1.5.0 curl -fsSL .../install.sh | sh     # pin a version
 #
 # This only puts the binary in place (download -> verify SHA256 -> extract).
@@ -9,7 +9,7 @@
 # we just print the command instead.
 set -eu
 
-REPO="${REPO:-Big-Pony/pocketshell}"
+REPO="${REPO:-SferaDev/pocketshell}"
 VERSION="${VERSION:-latest}"
 
 say() { printf '%s\n' "$*"; }

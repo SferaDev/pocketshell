@@ -16,7 +16,7 @@ import { normalizeInstanceName } from "./instance-brand";
 import { diagEnabled } from "./diag-report";
 
 /** The repo OTA is allowed to auto-apply from. See the `update` block below. */
-export const OFFICIAL_UPDATE_REPO = "Big-Pony/pocketshell";
+export const OFFICIAL_UPDATE_REPO = "SferaDev/pocketshell";
 
 export interface AgentConfig {
   listen: { host: string; port: number };

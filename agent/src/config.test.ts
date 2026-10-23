@@ -193,10 +193,10 @@ function envWith(over: Record<string, string | undefined>) {
   return { POCKETSHELL_KEY_DIR: mkdtempSync(join(tmpdir(), "ps-")), ...over };
 }
 
-test("update defaults: enabled + Big-Pony repo", () => {
+test("update defaults: enabled + fork repo", () => {
   const c = loadConfig(envWith({}));
   expect(c.update.enabled).toBe(true);
-  expect(c.update.repo).toBe("Big-Pony/pocketshell");
+  expect(c.update.repo).toBe("SferaDev/pocketshell");
 });
 
 test("POCKETSHELL_UPDATE=0 disables OTA", () => {
