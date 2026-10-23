@@ -31,6 +31,51 @@ test("claude hook from stdin JSON", async () => {
   expect(r?.body).toContain("Awaiting");
 });
 
+test("claude Stop uses last_assistant_message", async () => {
+  const j = JSON.stringify({ session_id: "s", last_assistant_message: "Refactor done", message: "ignored" });
+  const r = await parseNotifyPayload(withSession, [], j);
+  expect(r?.body).toBe("Refactor done");
+});
+
+test("codex last-assistant-message wins over last_assistant_message", async () => {
+  const j = JSON.stringify({ "last-assistant-message": "codex", last_assistant_message: "claude" });
+  expect((await parseNotifyPayload(withSession, [], j))?.body).toBe("codex");
+});
+
+test("AskUserQuestion PreToolUse uses the first question", async () => {
+  const j = JSON.stringify({
+    tool_name: "AskUserQuestion",
+    tool_input: { questions: [
+      { question: "Which database?", header: "DB", options: [] },
+      { question: "Which ORM?", header: "ORM", options: [] },
+    ] },
+  });
+  expect((await parseNotifyPayload(withSession, [], j))?.body).toBe("Which database?");
+});
+
+test("other tools' PreToolUse payloads do not produce a question body", async () => {
+  const j = JSON.stringify({ tool_name: "Bash", tool_input: { questions: [{ question: "x" }] }, message: "m" });
+  expect((await parseNotifyPayload(withSession, [], j))?.body).toBe("m");
+});
+
+test("notify claude writes nothing to stdout, even with the agent down", async () => {
+  const entry = join(import.meta.dir, "server.ts");
+  const run = async (env: Record<string, string>) => {
+    const p = Bun.spawn(["bun", entry, "notify", "claude"], {
+      stdin: new Blob([JSON.stringify({ last_assistant_message: "done" })]),
+      stdout: "pipe", stderr: "pipe", env: { PATH: process.env.PATH ?? "", ...env },
+    });
+    const [out, code] = await Promise.all([new Response(p.stdout).text(), p.exited]);
+    return { out, code };
+  };
+  expect(await run({})).toEqual({ out: "", code: 0 });
+  expect(await run({
+    POCKETSHELL_NOTIFY_SESSION: "work",
+    POCKETSHELL_NOTIFY_URL: "http://127.0.0.1:9/internal/notify",
+    POCKETSHELL_NOTIFY_TOKEN: "t",
+  })).toEqual({ out: "", code: 0 });
+});
+
 test("opencode/no payload falls back to generic body", async () => {
   const r = await parseNotifyPayload(withSession, [], "");
   expect(r).toEqual({ sessionId: "work", title: "work", body: "" });

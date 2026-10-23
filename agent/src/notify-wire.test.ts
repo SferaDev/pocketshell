@@ -8,14 +8,22 @@ const KIMI_MARK_LITERAL = "# pocketshell-notify";
 const bin = "/usr/local/bin/pocketshell-agent";
 const cmd = `${bin} notify claude`;
 
-test("wire into empty/missing settings creates Notification hook", () => {
+const NOTIF_MATCHER = "permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input";
+const ourCount = (j: any, event: string) =>
+  (j.hooks[event] ?? []).flatMap((e: any) => e.hooks).filter((h: any) => h.command === cmd).length;
+
+test("wire into empty/missing settings writes Stop, PreToolUse and Notification hooks", () => {
   const dir = mkdtempSync(join(tmpdir(), "cc-"));
   const f = join(dir, "settings.json");
   const r = wireClaude(f, bin);
   expect(r.ok).toBe(true);
   const j = JSON.parse(readFileSync(f, "utf8"));
-  const cmds = j.hooks.Notification.flatMap((e: any) => e.hooks.map((h: any) => h.command));
-  expect(cmds).toContain(cmd);
+  const hook = [{ type: "command", command: cmd }];
+  expect(j.hooks).toEqual({
+    Stop: [{ hooks: hook }],
+    PreToolUse: [{ matcher: "AskUserQuestion", hooks: hook }],
+    Notification: [{ matcher: NOTIF_MATCHER, hooks: hook }],
+  });
 });
 
 test("wire is idempotent", () => {
@@ -23,8 +31,49 @@ test("wire is idempotent", () => {
   const f = join(dir, "settings.json");
   wireClaude(f, bin); wireClaude(f, bin);
   const j = JSON.parse(readFileSync(f, "utf8"));
-  const count = j.hooks.Notification.flatMap((e: any) => e.hooks).filter((h: any) => h.command === cmd).length;
-  expect(count).toBe(1);
+  for (const event of ["Stop", "PreToolUse", "Notification"]) {
+    expect(ourCount(j, event)).toBe(1);
+    expect(j.hooks[event]).toHaveLength(1);
+  }
+});
+
+test("wire migrates the old matcher-less Notification entry and legacy command", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cc-"));
+  const f = join(dir, "settings.json");
+  writeFileSync(f, JSON.stringify({ hooks: { Notification: [
+    { matcher: "", hooks: [{ type: "command", command: cmd }] },
+    { matcher: "", hooks: [{ type: "command", command: `${bin} notify` }] },
+    { matcher: "", hooks: [{ type: "command", command: "user-notify" }] },
+  ] } }));
+  wireClaude(f, bin);
+  const j = JSON.parse(readFileSync(f, "utf8"));
+  expect(j.hooks.Notification).toEqual([
+    { matcher: "", hooks: [{ type: "command", command: "user-notify" }] },
+    { matcher: NOTIF_MATCHER, hooks: [{ type: "command", command: cmd }] },
+  ]);
+  expect(ourCount(j, "Stop")).toBe(1);
+  expect(ourCount(j, "PreToolUse")).toBe(1);
+});
+
+test("unwire removes our entries from all events and drops empty ones", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cc-"));
+  const f = join(dir, "settings.json");
+  wireClaude(f, bin); unwireClaude(f, bin);
+  expect(JSON.parse(readFileSync(f, "utf8"))).toEqual({ hooks: {} });
+});
+
+test("unwire keeps the user's own Stop, PreToolUse and Notification hooks", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cc-"));
+  const f = join(dir, "settings.json");
+  const user = { Stop: [{ hooks: [{ type: "command", command: "user-stop" }] }],
+    PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "user-pre" }] }],
+    Notification: [{ matcher: "", hooks: [{ type: "command", command: "user-notify" }] }] };
+  writeFileSync(f, JSON.stringify({ hooks: user }));
+  wireClaude(f, bin);
+  const wired = JSON.parse(readFileSync(f, "utf8"));
+  for (const event of Object.keys(user)) expect(ourCount(wired, event)).toBe(1);
+  unwireClaude(f, bin);
+  expect(JSON.parse(readFileSync(f, "utf8")).hooks).toEqual(user);
 });
 
 test("unwire removes only our hook, keeps user hooks", () => {

@@ -14,6 +14,22 @@ const oldNotifyCmd = (agentBin: string) => `${agentBin} notify`;
 const isOurNotifyCmd = (agentBin: string, command: string) =>
   command === notifyCmd(agentBin) || command === oldNotifyCmd(agentBin);
 
+// Stop = turn finished; PreToolUse/AskUserQuestion = interview question; the
+// Notification matcher keeps only "needs you" types (idle_prompt is covered by Stop).
+const CLAUDE_HOOKS: { event: string; matcher?: string }[] = [
+  { event: "Stop" },
+  { event: "PreToolUse", matcher: "AskUserQuestion" },
+  { event: "Notification", matcher: "permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input" },
+];
+const CLAUDE_EVENTS = CLAUDE_HOOKS.map((h) => h.event);
+
+// Drops our commands from one event's groups, then groups left empty.
+function stripOurs(list: any[], agentBin: string): any[] {
+  return list
+    .map((e) => (Array.isArray(e?.hooks) ? { ...e, hooks: e.hooks.filter((h: any) => !isOurNotifyCmd(agentBin, h?.command)) } : e))
+    .filter((e) => !Array.isArray(e?.hooks) || e.hooks.length > 0);
+}
+
 export function wireClaude(settingsPath: string, agentBin: string): WireResult {
   let root: any = {};
   if (existsSync(settingsPath)) {
@@ -22,16 +38,16 @@ export function wireClaude(settingsPath: string, agentBin: string): WireResult {
   }
   const cmd = notifyCmd(agentBin);
   root.hooks ??= {};
-  const list: any[] = Array.isArray(root.hooks.Notification) ? root.hooks.Notification : (root.hooks.Notification = []);
-
-  // 幂等：移除我们已有的旧/新命令（包括迁移旧版接线）。
-  for (const e of list) {
-    if (Array.isArray(e.hooks)) e.hooks = e.hooks.filter((h: any) => !isOurNotifyCmd(agentBin, h.command));
+  // 幂等：先清掉旧/新命令（含旧版 matcher "" 的 Notification 接线），再按新布局写入。
+  for (const event of CLAUDE_EVENTS) {
+    const existing = Array.isArray(root.hooks[event]) ? root.hooks[event] : [];
+    root.hooks[event] = stripOurs(existing, agentBin);
   }
-  const cleaned = list.filter((e) => !Array.isArray(e.hooks) || e.hooks.length > 0);
-  root.hooks.Notification = cleaned;
-
-  cleaned.push({ matcher: "", hooks: [{ type: "command", command: cmd }] });
+  for (const { event, matcher } of CLAUDE_HOOKS) {
+    const entry: any = { hooks: [{ type: "command", command: cmd }] };
+    if (matcher !== undefined) entry.matcher = matcher;
+    root.hooks[event].push(entry);
+  }
   try {
     mkdirSync(dirname(settingsPath), { recursive: true });
     writeFileSync(settingsPath, JSON.stringify(root, null, 2));
@@ -44,11 +60,12 @@ export function unwireClaude(settingsPath: string, agentBin: string): WireResult
   let root: any;
   try { root = JSON.parse(readFileSync(settingsPath, "utf8")); }
   catch (e) { return { ok: false, reason: "parse_error", detail: String(e) }; }
-  const list: any[] = root?.hooks?.Notification;
-  if (Array.isArray(list)) {
-    root.hooks.Notification = list
-      .map((e) => (Array.isArray(e.hooks) ? { ...e, hooks: e.hooks.filter((h: any) => !isOurNotifyCmd(agentBin, h.command)) } : e))
-      .filter((e) => !Array.isArray(e.hooks) || e.hooks.length > 0);
+  for (const event of CLAUDE_EVENTS) {
+    const list = root?.hooks?.[event];
+    if (!Array.isArray(list)) continue;
+    const kept = stripOurs(list, agentBin);
+    if (kept.length > 0) root.hooks[event] = kept;
+    else delete root.hooks[event];
   }
   try { writeFileSync(settingsPath, JSON.stringify(root, null, 2)); }
   catch (e) { return { ok: false, reason: "write_error", detail: String(e) }; }

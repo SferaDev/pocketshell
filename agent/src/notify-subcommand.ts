@@ -42,7 +42,9 @@ export async function parseNotifyPayload(
 
   let body = "";
   if (j && typeof j === "object") {
-    body = String(j["last-assistant-message"] ?? j.message ?? j.body ?? j.text ?? "");
+    const question = j.tool_name === "AskUserQuestion" && Array.isArray(j.tool_input?.questions)
+      ? j.tool_input.questions[0]?.question : undefined;
+    body = String(j["last-assistant-message"] ?? j.last_assistant_message ?? question ?? j.message ?? j.body ?? j.text ?? "");
   } else if (stdin.trim()) {
     body = stdin.trim();
   }
