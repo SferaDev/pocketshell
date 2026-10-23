@@ -95,6 +95,7 @@
   import { decodeHistoryData } from "../lib/term/history-decode";
   import { DEFAULT_SETTINGS } from "../lib/settings";
   import type { TermHistoryResult } from "../lib/net/protocol";
+  import { openTerminalLink } from "../lib/term/link-policy";
   import { familyOf, termFontFamily, type FontId } from "../lib/font";
   import { t } from "svelte-i18n";
   import ProgressLine from "./ui/ProgressLine.svelte";
@@ -231,6 +232,7 @@
       // 若日后调大 tmux history-limit，这里要同步调大，否则历史会被 xterm 截断。
       scrollback: 2000,
       unicodeVersion: "11",
+      linkHandler: { activate: openTerminalLink },
       convertEol: false,
       cursorBlink: true,
       disableStdin: true,

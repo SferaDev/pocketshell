@@ -102,3 +102,50 @@ export function isNotModified(ifNoneMatch: string | null, etag: string): boolean
   }
   return false;
 }
+
+/** sha256 CSP sources for the inline <script> blocks of an HTML document. */
+export function inlineScriptHashes(html: string): string[] {
+  const out: string[] = [];
+  for (const m of html.matchAll(/<script(?![^>]*\ssrc\s*=)[^>]*>([\s\S]*?)<\/script>/gi)) {
+    out.push(`'sha256-${createHash("sha256").update(m[1]).digest("base64")}'`);
+  }
+  return out;
+}
+
+const HOST_RE = /^[a-z0-9.-]+(:\d{1,5})?$|^\[[0-9a-f:.]+\](:\d{1,5})?$/i;
+
+/**
+ * CSP for the app shell. The phone's Noise key lives in localStorage, so
+ * script injection is the threat: no unsafe-inline/unsafe-eval for scripts.
+ * 'wasm-unsafe-eval' is required by the bundled crypto wasm, not by JS eval.
+ * ws/wss are listed with the request host because 'self' does not match
+ * WebSocket schemes in every browser.
+ */
+export function buildAppCsp(scriptHashes: string[], host: string | null): string {
+  const connect = ["'self'"];
+  if (host && HOST_RE.test(host)) connect.push(`ws://${host}`, `wss://${host}`);
+  return [
+    "default-src 'self'",
+    `script-src 'self' 'wasm-unsafe-eval' ${scriptHashes.join(" ")}`.trim(),
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "media-src 'self' blob:",
+    "font-src 'self' data:",
+    `connect-src ${connect.join(" ")}`,
+    "frame-src 'self'",
+    "worker-src 'self'",
+    "manifest-src 'self'",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+  ].join("; ");
+}
+
+export function staticSecurityHeaders(scriptHashes: string[], host: string | null): Record<string, string> {
+  return {
+    "Content-Security-Policy": buildAppCsp(scriptHashes, host),
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+  };
+}

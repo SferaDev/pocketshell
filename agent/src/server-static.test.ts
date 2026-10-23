@@ -112,3 +112,35 @@ test("precompressed variant: br served with original content-type, identity with
     expect(revalidate.headers.get("etag")).toBe(brEtag);
   });
 });
+
+test("static responses carry CSP with the inline-script hash; /preview keeps its own policy", async () => {
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const { createHash } = await import("node:crypto");
+  const root = mkdtempSync(join(tmpdir(), "ps-csp-"));
+  const inline = "document.title='x'";
+  writeFileSync(join(root, "index.html"), `<!doctype html><script>${inline}</script><script type="module" src="/a.js"></script>`);
+  writeFileSync(join(root, "a.js"), "export const a=1");
+  const assets = { "/index.html": join(root, "index.html"), "/a.js": join(root, "a.js") };
+
+  await withServer(assets, async (base) => {
+    const hash = `'sha256-${createHash("sha256").update(inline).digest("base64")}'`;
+    for (const path of ["/", "/a.js"]) {
+      const res = await fetch(`${base}${path}`);
+      const csp = res.headers.get("content-security-policy") ?? "";
+      expect(csp).toContain("default-src 'self'");
+      expect(csp).toContain(hash);
+      expect(csp).toContain(`ws://${new URL(base).host}`);
+      expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+      expect(res.headers.get("referrer-policy")).toBe("no-referrer");
+    }
+    const etag = (await fetch(`${base}/`)).headers.get("etag") ?? "";
+    const nm = await fetch(`${base}/`, { headers: { "if-none-match": etag } });
+    expect(nm.status).toBe(304);
+    expect(nm.headers.get("content-security-policy")).toContain("default-src 'self'");
+
+    const pv = await fetch(`${base}/preview/badtoken/a.png`);
+    expect(pv.headers.get("content-security-policy") ?? "").not.toContain("default-src");
+  });
+});

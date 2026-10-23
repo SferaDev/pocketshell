@@ -1,5 +1,6 @@
 import { test, expect } from "bun:test";
-import { resolveStatic, contentEtag, isNotModified } from "./static-serve";
+import { createHash } from "node:crypto";
+import { resolveStatic, contentEtag, isNotModified, inlineScriptHashes, buildAppCsp, staticSecurityHeaders } from "./static-serve";
 
 const keys = new Set(["/index.html", "/assets/index-abc.js", "/assets/index-abc.css", "/favicon.svg"]);
 
@@ -98,4 +99,38 @@ test("isNotModified matches exact, list, weak and star forms", () => {
   expect(isNotModified('W/"abc123"', etag)).toBe(true);
   expect(isNotModified("*", etag)).toBe(true);
   expect(isNotModified('"other"', etag)).toBe(false);
+});
+
+test("inlineScriptHashes hashes inline scripts only", () => {
+  const html = '<script>var a=1;</script><script type="module" src="/x.js"></script><script src="/y.js"></script>';
+  const want = `'sha256-${createHash("sha256").update("var a=1;").digest("base64")}'`;
+  expect(inlineScriptHashes(html)).toEqual([want]);
+});
+
+test("app CSP is strict and scopes ws/wss to the request host", () => {
+  const csp = buildAppCsp(["'sha256-abc='"], "pocket.example:8722");
+  const dirs = Object.fromEntries(csp.split("; ").map((d) => [d.split(" ")[0], d.split(" ").slice(1)]));
+  expect(dirs["default-src"]).toEqual(["'self'"]);
+  expect(dirs["script-src"]).toEqual(["'self'", "'wasm-unsafe-eval'", "'sha256-abc='"]);
+  expect(csp).not.toContain("'unsafe-eval'");
+  expect(dirs["script-src"]).not.toContain("'unsafe-inline'");
+  expect(dirs["connect-src"]).toEqual(["'self'", "ws://pocket.example:8722", "wss://pocket.example:8722"]);
+  expect(dirs["object-src"]).toEqual(["'none'"]);
+  expect(dirs["base-uri"]).toEqual(["'none'"]);
+  expect(dirs["frame-ancestors"]).toEqual(["'none'"]);
+  expect(dirs["frame-src"]).toEqual(["'self'"]);
+});
+
+test("app CSP drops a malformed host instead of injecting it", () => {
+  expect(buildAppCsp([], "evil; script-src *")).toContain("connect-src 'self'");
+  expect(buildAppCsp([], "evil; script-src *")).not.toContain("evil");
+  expect(buildAppCsp([], null)).toContain("connect-src 'self';");
+  expect(buildAppCsp([], "[::1]:8722")).toContain("ws://[::1]:8722");
+});
+
+test("staticSecurityHeaders adds nosniff and no-referrer", () => {
+  const h = staticSecurityHeaders([], "h:1");
+  expect(h["X-Content-Type-Options"]).toBe("nosniff");
+  expect(h["Referrer-Policy"]).toBe("no-referrer");
+  expect(h["Content-Security-Policy"]).toContain("default-src 'self'");
 });

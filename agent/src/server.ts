@@ -18,7 +18,7 @@ import { sessionListsEqual } from "./sessions-diff";
 import { isSaneSize } from "./sane-size";
 import { toB64, fromB64 } from "./bytes";
 import { createResponderChannel, type SecureChannel } from "./secure-channel";
-import { resolveStatic, contentEtag, isNotModified } from "./static-serve";
+import { resolveStatic, contentEtag, isNotModified, inlineScriptHashes, staticSecurityHeaders } from "./static-serve";
 import { brandManifest, brandHtml } from "./instance-brand";
 import { ASSETS } from "./embedded-manifest";
 import { createPairing, readPendingPairing, clearPendingPairing, shouldAdoptDiskPairing } from "./pairing";
@@ -180,6 +180,11 @@ export function startServer(deps: Deps = {}) {
   // 需要按实例名改写的两个文件。其余静态资源走原路径。
   const BRANDED_ASSETS = new Set(["/manifest.webmanifest", "/index.html"]);
   const etagCache = new Map<string, string>();
+  let scriptHashes: Promise<string[]> | undefined;
+  const indexScriptHashes = (): Promise<string[]> =>
+    (scriptHashes ??= assets["/index.html"]
+      ? Bun.file(assets["/index.html"]).text().then(inlineScriptHashes, () => [])
+      : Promise.resolve([]));
   const etagFor = async (assetKey: string): Promise<string> => {
     let etag = etagCache.get(assetKey);
     if (!etag) {
@@ -1088,12 +1093,15 @@ export function startServer(deps: Deps = {}) {
         const r = importTheme(config.themes, body);
         return Response.json(r, { status: r.ok ? 200 : 400 });
       }
-      const r = resolveStatic(
+      const r0 = resolveStatic(
         url.pathname,
         req.headers.get("accept") ?? "",
         assetKeys,
         req.headers.get("accept-encoding") ?? "",
       );
+      const r = r0.status === 200
+        ? { ...r0, headers: { ...r0.headers, ...staticSecurityHeaders(await indexScriptHashes(), req.headers.get("host")) } }
+        : r0;
       // 实例身份：manifest 与 index.html 的名称字段按 instanceName 改写。**只有
       // 设了实例名才走这条分支** —— 不设时必须原样落到下面那条 Bun.file 路径，
       // 否则 content-type 会从 Bun 的推断值漂到这里手写的 MIME（html 那条差一个
