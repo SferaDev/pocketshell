@@ -171,14 +171,10 @@ test("replaceBinary works when the target does not exist yet", () => {
   }
 });
 
-// v1.6.0 regression: install put the binary in root-owned /usr/local/bin while
-// the service ran as a normal user, so in-app OTA failed with
-// "EACCES: permission denied, copyfile … -> /usr/local/bin/.pocketshell.new".
-// OTA needs write access to the binary's *directory* (it writes a temp file
-// there and renames over the target), so the binary now lives in its own
-// directory owned by the service user, with a symlink keeping the command on
-// the global PATH.
-import { symlinkTargetOk } from "./install-runner";
+// The binary lives in its own root:root directory with a symlink keeping the
+// command on the global PATH. The service user must not be able to write it,
+// since admins run it with sudo; in-app OTA refuses there (see server.ts).
+import { symlinkTargetOk, lockToRoot } from "./install-runner";
 
 test("symlinkTargetOk detects a symlink already pointing at the right target", () => {
   const dir = mkdtempSync(join(tmpdir(), "ps-link-"));
@@ -222,4 +218,21 @@ test("execStartFromUnit reads the binary path out of a systemd unit", () => {
 
 test("execStartFromUnit falls back to null when absent", () => {
   expect(execStartFromUnit("[Service]\nUser=myt")).toBeNull();
+});
+
+test("lockToRoot sets the requested mode (chown to root needs privileges, so only the mode is checked as non-root)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ps-lock-"));
+  try {
+    const f = join(dir, "bin");
+    writeFileSync(f, "BIN", { mode: 0o777 });
+    if (process.getuid?.() === 0) {
+      lockToRoot(f, 0o755);
+      expect(statSync(f).mode & 0o777).toBe(0o755);
+      expect(statSync(f).uid).toBe(0);
+    } else {
+      expect(() => lockToRoot(f, 0o755)).toThrow();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

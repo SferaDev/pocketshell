@@ -113,12 +113,7 @@ test("linux: SUDO_USER becomes the service user, and keyDir follows its home", (
   expect(p.user).toBe("myt");
   expect(p.home).toBe("/home/myt");
   expect(p.keyDir).toBe("/home/myt/.pocketshell");
-  // Binary lives in a dedicated directory owned by the service user, NOT in
-  // /usr/local/bin: in-app OTA updates write a temp file next to the binary and
-  // rename over it, which needs write access to the *directory*. Shipping it to
-  // root-owned /usr/local/bin broke OTA with EACCES on the dev server (v1.6.0).
   expect(p.binPath).toBe("/opt/pocketshell/pocketshell-agent");
-  expect(p.binOwner).toBe("myt");
   // …while a symlink keeps the command on the global PATH, so
   // `sudo pocketshell-agent uninstall` still resolves.
   expect(p.symlinkPath).toBe("/usr/local/bin/pocketshell-agent");
@@ -133,19 +128,38 @@ test("linux: ExecStart points at the real binary, not the symlink", () => {
   expect(renderSystemdUnit(p)).toContain("ExecStart=/opt/pocketshell/pocketshell-agent");
 });
 
-test("linux: the OTA-writable directory is derived from the binary path", () => {
+test("linux: the plan has no service-user owner for the binary directory", () => {
   const p = plan({ env: { SUDO_USER: "myt" } });
-  // dirname(binPath) is what install chowns to the service user.
-  expect(p.binPath.startsWith("/opt/pocketshell/")).toBe(true);
+  expect("binOwner" in p).toBe(false);
+});
+
+test("linux: no SUDO_USER and no --user is refused rather than running as root", () => {
+  expect(planErr({ env: {} })).toContain("--user");
+});
+
+test("linux: SUDO_USER=root is treated as no sudo user", () => {
+  expect(planErr({ env: { SUDO_USER: "root" } })).toContain("--user");
+});
+
+test("linux: an explicit --user root is honoured", () => {
+  expect(plan({ env: {}, opts: { ...OPTS, user: "root" } }).user).toBe("root");
+});
+
+test("linux: the unit carries low-risk hardening but not the directives that break a terminal host", () => {
+  const unit = renderSystemdUnit(plan({ env: { SUDO_USER: "myt" } }));
+  expect(unit).toContain("LockPersonality=true");
+  expect(unit).toContain("RestrictRealtime=true");
+  for (const bad of ["ProtectHome", "ProtectSystem", "PrivateTmp", "NoNewPrivileges"]) {
+    expect(unit).not.toContain(bad);
+  }
 });
 
 test("linux: --user overrides SUDO_USER", () => {
   expect(plan({ env: { SUDO_USER: "myt" }, opts: { ...OPTS, user: "alice" } }).user).toBe("alice");
 });
 
-test("linux: direct root login (no SUDO_USER) falls back to root", () => {
-  const p = plan({ env: {} });
-  expect(p.user).toBe("root");
+test("linux: --user root keys the state under /root", () => {
+  const p = plan({ env: {}, opts: { ...OPTS, user: "root" } });
   expect(p.keyDir).toBe("/root/.pocketshell");
 });
 
@@ -227,6 +241,8 @@ Environment=POCKETSHELL_KEY_DIR=/home/myt/.pocketshell
 Environment=POCKETSHELL_INSTANCE_NAME=开发
 Restart=always
 RestartSec=3
+LockPersonality=true
+RestrictRealtime=true
 
 [Install]
 WantedBy=multi-user.target

@@ -7,7 +7,7 @@ const PLAN: InstallPlan = {
   platform: "linux", user: "myt", home: "/home/myt",
   keyDir: "/home/myt/.pocketshell",
   binPath: "/opt/pocketshell/pocketshell-agent",
-  binOwner: "myt", symlinkPath: "/usr/local/bin/pocketshell-agent",
+  symlinkPath: "/usr/local/bin/pocketshell-agent",
   unitPath: "/etc/systemd/system/pocketshell.service",
   label: "pocketshell",
   env: {

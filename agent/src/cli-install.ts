@@ -23,7 +23,7 @@ export const INSTALL_USAGE = [
   "",
   "  --advertise  Required. The external address baked into the pairing string, which is how your phone connects. Must start with ws:// or wss://.",
   "  --name       Instance name, to tell several installs apart (shown on the PWA icon and in the app's top bar).",
-  "  --user       User the service runs as. Defaults to whoever invoked sudo on Linux, or the current user on macOS.",
+  "  --user       User the service runs as. Defaults to whoever invoked sudo on Linux (required when run from a plain root shell), or the current user on macOS.",
   "  --host       Bind address, default 127.0.0.1 (keep it behind a reverse proxy; use 0.0.0.0 for a phone connecting straight over the LAN).",
   "  --port       Port, default 8722.",
 ].join("\n");
@@ -110,8 +110,6 @@ export interface InstallPlan {
   home: string;
   keyDir: string;
   binPath: string;
-  /** Linux: the binary's directory is chown'd to this user so OTA can rename over it. */
-  binOwner?: string;
   /** Linux: symlink on the global PATH pointing at binPath. */
   symlinkPath?: string;
   unitPath: string;
@@ -154,12 +152,10 @@ function buildEnv(opts: InstallOpts, keyDir: string): Record<string, string> {
   return env;
 }
 
-// Where the Linux binary lives. Deliberately NOT /usr/local/bin: in-app OTA
-// updates write `.pocketshell.new` next to the running binary and rename over
-// it (see runApply in server.ts), so the service user needs write access to the
-// *directory*, not just the file. /usr/local/bin is root-owned and chowning it
-// to a normal user is not acceptable — so the binary gets its own directory,
-// owned by whoever the service runs as.
+// Where the Linux binary lives, owned by root:root. The service user must not be
+// able to write it: admins run `sudo pocketshell-agent …`, so a user-writable
+// binary is a local root escalation. In-app OTA therefore refuses here (see
+// runApply in server.ts); update with sudo instead.
 //
 // A symlink at /usr/local/bin/pocketshell-agent keeps the command on the global
 // PATH, which matters because `sudo pocketshell-agent uninstall` resolves via
@@ -172,7 +168,11 @@ export function resolvePlan(i: ResolveInput): { ok: true; plan: InstallPlan } | 
     if (i.euid !== 0) {
       return { ok: false, message: `install needs root (it writes ${LINUX_BIN_DIR}, /etc/systemd/system and ${LINUX_SYMLINK}).\nRun it as: sudo pocketshell-agent install …` };
     }
-    const user = i.opts.user ?? i.env.SUDO_USER ?? "root";
+    const sudoUser = i.env.SUDO_USER && i.env.SUDO_USER !== "root" ? i.env.SUDO_USER : undefined;
+    const user = i.opts.user ?? sudoUser;
+    if (!user) {
+      return { ok: false, message: "Refusing to run the service as root: no sudo user was detected.\nName the account whose shell the phone should get: pocketshell-agent install --user <name> …" };
+    }
     const home = i.homeOf(user);
     if (!home) {
       return { ok: false, message: `No such user on this system: "${user}". Pass --user with an existing account.` };
@@ -186,7 +186,6 @@ export function resolvePlan(i: ResolveInput): { ok: true; plan: InstallPlan } | 
         home,
         keyDir,
         binPath: `${LINUX_BIN_DIR}/pocketshell-agent`,
-        binOwner: user,
         symlinkPath: LINUX_SYMLINK,
         unitPath: `/etc/systemd/system/${SYSTEMD_UNIT_NAME}.service`,
         label: SYSTEMD_UNIT_NAME,
@@ -252,6 +251,8 @@ export function renderSystemdUnit(plan: InstallPlan): string {
     ...envLines,
     "Restart=always",
     "RestartSec=3",
+    "LockPersonality=true",
+    "RestrictRealtime=true",
     "",
     "[Install]",
     "WantedBy=multi-user.target",

@@ -6,7 +6,7 @@
 // argv array to Bun.spawn. A `sudo -S` + pipe combination silently swallowed a
 // heredoc during the 2026-07-30 manual install and still exited 0 — argv arrays
 // make that class of failure impossible.
-import { existsSync, copyFileSync, writeFileSync, readFileSync, mkdirSync, realpathSync, chmodSync, rmSync, symlinkSync, lstatSync, readlinkSync } from "node:fs";
+import { existsSync, copyFileSync, writeFileSync, readFileSync, mkdirSync, realpathSync, chmodSync, chownSync, rmSync, symlinkSync, lstatSync, readlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
   parseInstallArgv, resolvePlan,
@@ -85,10 +85,21 @@ export function symlinkTargetOk(link: string, target: string): boolean {
   }
 }
 
+/** Makes a path root:root with the given mode, so the service user cannot write it. */
+export function lockToRoot(path: string, mode: number): void {
+  chownSync(path, 0, 0);
+  chmodSync(path, mode);
+}
+
 /** Copies the running binary into place, skipping a no-op self-copy. */
 function installBinary(plan: InstallPlan): string[] {
   const lines: string[] = [];
   const src = realpathSync(process.execPath);
+  // Lock the directory first so a user-owned leftover cannot be raced during the copy.
+  if (plan.platform === "linux") {
+    mkdirSync(dirname(plan.binPath), { recursive: true });
+    lockToRoot(dirname(plan.binPath), 0o755);
+  }
   const alreadyThere = existsSync(plan.binPath) && realpathSync(plan.binPath) === src;
   if (alreadyThere) {
     // Copying a file onto itself truncates the running binary to 0 bytes.
@@ -97,14 +108,10 @@ function installBinary(plan: InstallPlan): string[] {
     replaceBinary(src, plan.binPath);
     lines.push(`Installed binary: ${plan.binPath}`);
   }
-  // Hand the binary's directory to the service user: OTA writes a temp file
-  // beside the binary and renames over it, which needs directory write access
-  // (v1.6.0 shipped it root-owned and OTA died with EACCES).
-  if (plan.binOwner) {
-    const dir = dirname(plan.binPath);
-    const r = Bun.spawnSync(["chown", "-R", `${plan.binOwner}:`, dir]);
-    if (r.exitCode === 0) lines.push(`Handed ${dir} to ${plan.binOwner} (in-app updates need to write there)`);
-    else lines.push(`Warning: chown ${dir} failed; in-app updates may fail for lack of permission`);
+  if (plan.platform === "linux") {
+    // The service user must not be able to replace a binary that root later runs via sudo.
+    lockToRoot(plan.binPath, 0o755);
+    lines.push(`Locked ${dirname(plan.binPath)} to root:root (update with sudo; in-app updates are refused)`);
   }
   // Keep the command on the global PATH — `sudo pocketshell-agent uninstall`
   // resolves through root's PATH, which does not include the install dir.

@@ -47,7 +47,7 @@ import { runCli } from "./cli-entry";
 // 工具」——includes(undefined) 返回 false，运行时语义不变。
 function isAiTool(t: string | undefined): t is AiTool { return (AI_TOOLS as readonly string[]).includes(t as string); }
 import { ensureVapid, realPushSender } from "./web-push";
-import { renameSync, copyFileSync, chmodSync } from "node:fs";
+import { renameSync, copyFileSync, chmodSync, accessSync, constants } from "node:fs";
 import { dirname, join as pathJoin } from "node:path";
 import { homedir } from "node:os";
 import { $ } from "bun";
@@ -535,6 +535,10 @@ export function startServer(deps: Deps = {}) {
       const newPath = pathJoin(dirname(target), ".pocketshell.new");
       let swapped = false;
       try {
+        // A system install keeps the binary directory root-owned on purpose.
+        try { accessSync(dirname(target), constants.W_OK); } catch {
+          throw new Error(`cannot write ${dirname(target)}; this install is root-owned; update it as root by running the new binary with: sudo ./pocketshell-agent-<os>-<arch> install ...`);
+        }
         // Download + checksum-verify into keyDir/updates/ (may be on a
         // different filesystem than execPath — see the copy+rename below).
         const { binaryPath } = await downloadAndVerify({

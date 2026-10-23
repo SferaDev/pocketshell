@@ -172,7 +172,6 @@ function planFromSystemdUnit(text: string, unitPath: string): InstallPlan | null
     home,
     keyDir: env.POCKETSHELL_KEY_DIR ?? `${home}/.pocketshell`,
     binPath,
-    binOwner: user,
     symlinkPath: LINUX_SYMLINK,
     unitPath,
     label: SYSTEMD_UNIT_NAME,
