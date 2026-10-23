@@ -1094,3 +1094,40 @@ test("ping is answered with pong", async () => {
   ws.close();
   srv.stop();
 });
+
+test("unauthenticated socket that never handshakes is closed at the deadline", async () => {
+  const srv = startServer({ port: 0, channelFactory: passthroughResponder, handshakeTimeoutMs: 20 });
+  let closed = false;
+  const ws: any = { sent: [], send() {}, close() { closed = true; } };
+  srv.__test.open(ws);
+  await waitFor(() => closed);
+  expect(closed).toBe(true);
+  srv.stop();
+});
+
+test("handshake deadline does not close a socket that completed the handshake", async () => {
+  const srv = startServer({ port: 0, channelFactory: passthroughResponder, handshakeTimeoutMs: 20 });
+  let closed = false;
+  const ws: any = { sent: [], send() {}, close() { closed = true; } };
+  srv.__test.open(ws);
+  srv.__test.message(ws, M1);
+  await Bun.sleep(80);
+  expect(closed).toBe(false);
+  srv.stop();
+});
+
+test("oversize pre-auth frame closes the socket before the channel sees it", () => {
+  let received = 0;
+  const factory = (): SecureChannel => ({
+    state: "handshaking", start() { return null; }, send: (pt) => pt,
+    receive() { received++; return { status: "fail", reason: "x" } as any; },
+  });
+  const srv = startServer({ port: 0, channelFactory: factory });
+  let closed = false;
+  const ws: any = { sent: [], send() {}, close() { closed = true; } };
+  srv.__test.open(ws);
+  srv.__test.message(ws, new Uint8Array(4097));
+  expect(closed).toBe(true);
+  expect(received).toBe(0);
+  srv.stop();
+});

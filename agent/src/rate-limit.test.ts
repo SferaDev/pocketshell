@@ -29,3 +29,18 @@ test("lock expires after lockMs", () => {
   t = 300_001;
   expect(rl.isLocked("3.3.3.3")).toBe(false);
 });
+
+test("expired entries are pruned; locked and live entries are kept", () => {
+  let t = 0;
+  const rl = createRateLimiter({ windowMs: 60_000, maxFailures: 2, lockMs: 300_000, now: () => t });
+  rl.record("4.4.4.4");
+  rl.record("5.5.5.5"); rl.record("5.5.5.5"); // locked until 300_000
+  expect(rl.size()).toBe(2);
+  t = 61_000;
+  rl.record("6.6.6.6"); // prunes 4.4.4.4 only
+  expect(rl.size()).toBe(2);
+  expect(rl.isLocked("5.5.5.5")).toBe(true);
+  t = 400_000;
+  rl.record("7.7.7.7");
+  expect(rl.size()).toBe(1);
+});

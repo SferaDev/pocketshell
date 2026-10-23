@@ -86,6 +86,7 @@ interface Deps {
   replay?: ReplayService;
   channelFactory?: () => SecureChannel;
   pairTimeoutMs?: number;
+  handshakeTimeoutMs?: number;
   assets?: Record<string, string>;
   /**
    * 覆盖诊断埋点开关，仅供测试。生产走 config（env `POCKETSHELL_DIAG` 或
@@ -101,6 +102,14 @@ interface Deps {
 // **不是可选装饰，是让上传/保存不失败的必要前提**。两个 sessions 发送点
 // （广播 + listSessions 回复）共用同一个常量，防止两处各自维护漂移出偏差。
 const AGENT_FEATURES: string[] = ["bin"];
+
+// Unauthenticated sockets must finish the Noise handshake (or reach pairing) within this.
+const HANDSHAKE_TIMEOUT_MS = 10_000;
+// Noise msg1 and the pair message are well under 1 KiB.
+const PREAUTH_MAX_FRAME_BYTES = 4096;
+// A Noise frame is at most 65535 B; 128 KiB leaves headroom (Bun's default is 16 MB).
+const WS_MAX_PAYLOAD_BYTES = 128 * 1024;
+const rawLength = (raw: Uint8Array | string) => (typeof raw === "string" ? Buffer.byteLength(raw) : raw.byteLength);
 
 export function startServer(deps: Deps = {}) {
   const config = deps.config ?? loadConfig();
@@ -162,6 +171,7 @@ export function startServer(deps: Deps = {}) {
     (() => createResponderChannel({ identity: config.identity, authorize }));
 
   const pairTimeoutMs = deps.pairTimeoutMs ?? 10_000;
+  const handshakeTimeoutMs = deps.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
   const assets = deps.assets ?? ASSETS;
   const assetKeys = new Set(Object.keys(assets));
   // Content-addressed validators: hash each served file once (lazily), then
@@ -187,6 +197,7 @@ export function startServer(deps: Deps = {}) {
     remoteStatic: string | null;
     ip: string;
     pairTimer?: ReturnType<typeof setTimeout>;
+    handshakeTimer?: ReturnType<typeof setTimeout>;
     // A3: sessions this conn receives output/exit for. attach adds, detach
     // removes; old clients never detach, so their set only grows (≈ old
     // broadcast behaviour, minus sessions they never attached to).
@@ -921,6 +932,7 @@ export function startServer(deps: Deps = {}) {
     if (ip && config.rateLimiter.isLocked(ip)) { ws.close(); return; }
     const conn: Conn = { ws, channel: factory(), ready: false, pending: false, remoteStatic: null, ip, subscriptions: new Set(), needsResyncSessions: new Set() };
     conns.set(ws, conn);
+    conn.handshakeTimer = setTimeout(() => { if (!conn.ready && !conn.pending) ws.close(); }, handshakeTimeoutMs);
     const m1 = conn.channel.start();
     if (m1) ws.send(m1); // responder returns null; kept for symmetry
   };
@@ -928,6 +940,7 @@ export function startServer(deps: Deps = {}) {
   const onMessage = (ws: ServerWebSocket<unknown>, raw: Uint8Array | string) => {
     const conn = conns.get(ws);
     if (!conn) return;
+    if (!conn.ready && !conn.pending && rawLength(raw) > PREAUTH_MAX_FRAME_BYTES) { ws.close(); return; }
     const frame = typeof raw === "string" ? new Uint8Array(Buffer.from(raw, "utf8")) : new Uint8Array(raw as Uint8Array);
     const r = conn.channel.receive(frame);
     if (r.status === "fail") {
@@ -947,6 +960,7 @@ export function startServer(deps: Deps = {}) {
     if (r.status === "handshake") {
       if (r.reply) ws.send(r.reply);
       if (r.established) {
+        clearTimeout(conn.handshakeTimer);
         conn.remoteStatic = r.remoteStatic ?? null;
         if (r.pending) {
           conn.pending = true;
@@ -1128,10 +1142,12 @@ export function startServer(deps: Deps = {}) {
       return new Response("Not found", { status: 404 });
     },
     websocket: {
+      maxPayloadLength: WS_MAX_PAYLOAD_BYTES,
       open(ws) { onOpen(ws, (ws as any).remoteAddress ?? ""); },
       close(ws) {
         const conn = conns.get(ws);
         conns.delete(ws);
+        if (conn) { clearTimeout(conn.handshakeTimer); clearTimeout(conn.pairTimer); }
         // Reclaim this device's preview tokens once it has no live socket left.
         if (conn?.remoteStatic && ![...conns.values()].some((c) => c.remoteStatic === conn.remoteStatic)) {
           previewTokens.revokeDevice(conn.remoteStatic);
