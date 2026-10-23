@@ -5,7 +5,7 @@
 // 面板和终端永远不会给出不同答案）。
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { runGit, isRepo } from "./git-service";
+import { runGit, isRepo, isSafeRevision } from "./git-service";
 import {
   parseNumstat, parsePorcelain, stagedMark, splitDiffByFile, synthAddedHunk,
   planBudget, FILE_LINE_CAP, TOTAL_LINE_BUDGET, type DiffHunk, type DiffFileEntry,
@@ -26,6 +26,9 @@ export type ResolvedScope =
 
 /** 主干候选，按优先级。origin/HEAD 在 §3.1 由调用方先试，这里只管本地分支名。 */
 const TRUNK_CANDIDATES = ["main", "master", "develop"];
+
+// Config-driven external diff and textconv programs would run arbitrary commands.
+const NO_EXEC = ["--no-ext-diff", "--no-textconv"];
 
 /** HEAD 是否存在。空仓库（一次提交都没有）时 `git diff HEAD` 会直接报错。 */
 export function hasHead(cwd: string): boolean {
@@ -51,15 +54,25 @@ export function diffArgs(
   scope: ResolvedScope, hasHeadRef: boolean,
 ): { numstat: string[]; body: string[] } | null {
   const R = "--find-renames";
-  const pair = (base: string[]) => ({ numstat: [...base, "--numstat", R], body: [...base, R] });
+  const pair = (base: string[]) => ({
+    numstat: [base[0], ...NO_EXEC, ...base.slice(1), "--numstat", R],
+    body: [base[0], ...NO_EXEC, ...base.slice(1), R],
+  });
 
   if (scope.kind === "commit") {
+    const show = ["show", ...NO_EXEC, "--format=", R];
     return {
-      numstat: ["show", scope.hash, "--numstat", "--format=", R],
-      body: ["show", scope.hash, "--format=", R],
+      numstat: [...show, "--numstat", "--end-of-options", scope.hash],
+      body: [...show, "--end-of-options", scope.hash],
     };
   }
-  if (scope.kind === "range") return pair(["diff", `${scope.base}...HEAD`]);
+  if (scope.kind === "range") {
+    const rev = ["--end-of-options", `${scope.base}...HEAD`];
+    return {
+      numstat: ["diff", ...NO_EXEC, "--numstat", R, ...rev],
+      body: ["diff", ...NO_EXEC, R, ...rev],
+    };
+  }
 
   // worktree
   if (!hasHeadRef) {
@@ -85,7 +98,7 @@ export function inferBaseline(cwd: string): string {
     if (name) return name;
   }
   for (const b of TRUNK_CANDIDATES) {
-    if (runGit(cwd, ["rev-parse", "--verify", "-q", b]).ok) return b;
+    if (runGit(cwd, ["rev-parse", "--verify", "-q", "--end-of-options", b]).ok) return b;
   }
   throw new Error("no_baseline");
 }
@@ -130,6 +143,9 @@ export function gitReview(cwd: string, rawScope: ReviewScope): ReviewResult {
   const scope: ResolvedScope = inferred
     ? { kind: "range", base: inferBaseline(cwd) }
     : (rawScope as ResolvedScope);
+
+  if (scope.kind === "commit" && !isSafeRevision(scope.hash)) throw new Error("bad_revision");
+  if (scope.kind === "range" && !isSafeRevision(scope.base)) throw new Error("bad_revision");
 
   const headExists = scope.kind === "worktree" ? hasHead(cwd) : true;
   const args = diffArgs(scope, headExists);
@@ -280,7 +296,7 @@ function revisionError(scope: ResolvedScope, stderr: string): string {
 
 function titleOf(cwd: string, scope: ResolvedScope): string {
   if (scope.kind === "commit") {
-    const s = runGit(cwd, ["show", "-s", "--format=%h %s", scope.hash]);
+    const s = runGit(cwd, ["show", "-s", "--format=%h %s", "--end-of-options", scope.hash]);
     return s.ok ? s.stdout.trim() : scope.hash;
   }
   if (scope.kind === "range") {
@@ -292,7 +308,7 @@ function titleOf(cwd: string, scope: ResolvedScope): string {
 
 function subtitleOf(cwd: string, scope: ResolvedScope): string {
   if (scope.kind === "commit") {
-    const s = runGit(cwd, ["show", "-s", "--format=%an · %ad", "--date=relative", scope.hash]);
+    const s = runGit(cwd, ["show", "-s", "--format=%an · %ad", "--date=relative", "--end-of-options", scope.hash]);
     return s.ok ? s.stdout.trim() : "";
   }
   return "";   // 其余由前端 i18n 组装

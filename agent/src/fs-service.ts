@@ -90,17 +90,30 @@ export function fsRead(path: string, opts: { maxBytes?: number; maxLines?: numbe
   const abs = resolve(path);
   const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES;
   const maxLines = opts.maxLines ?? DEFAULT_MAX_LINES;
-  const buf = readFileSync(abs); // throws ENOENT → caller wraps
+  const st = statSync(abs); // throws ENOENT → caller wraps
+  if (!st.isFile()) throw new Error(`enotfile: ${abs} is not a regular file`);
+  // One byte past the cap so truncation is detectable without reading the rest.
+  const want = Math.min(st.size, maxBytes + 1);
+  const buf = Buffer.alloc(want);
+  const fd = openSync(abs, "r");
+  let got = 0;
+  try {
+    while (got < want) {
+      const n = readSync(fd, buf, got, want - got, got);
+      if (n === 0) break;
+      got += n;
+    }
+  } finally { closeSync(fd); }
   const lang = langForExt(abs);
-  const mtime = Math.floor(statSync(abs).mtimeMs);
+  const mtime = Math.floor(st.mtimeMs);
 
   // Binary sniff: a NUL byte in the first chunk means "not text".
-  const sniff = buf.subarray(0, Math.min(buf.length, 8192));
+  const sniff = buf.subarray(0, Math.min(got, 8192));
   if (sniff.includes(0)) return { path: abs, content: "", lang, mtime, binary: true };
 
   let truncated = false;
-  let slice = buf;
-  if (buf.length > maxBytes) { slice = buf.subarray(0, maxBytes); truncated = true; }
+  let slice = buf.subarray(0, got);
+  if (got > maxBytes) { slice = buf.subarray(0, maxBytes); truncated = true; }
   let text = slice.toString("utf8");
   const lines = text.split("\n");
   if (lines.length > maxLines) { text = lines.slice(0, maxLines).join("\n"); truncated = true; }
@@ -112,7 +125,7 @@ export interface DiffHunk { header: string; lines: { kind: "add" | "del" | "ctx"
 export function fsDiff(path: string, cwd?: string): { path: string; hunks: DiffHunk[] } {
   const abs = resolve(path);
   if (!cwd || cwd === "undefined") cwd = dirname(abs);
-  const r = runGit(cwd, ["diff", "--", abs]);
+  const r = runGit(cwd, ["diff", "--no-ext-diff", "--no-textconv", "--", abs]);
   const hunks: DiffHunk[] = [];
   let cur: DiffHunk | null = null;
   for (const line of r.stdout.split("\n")) {

@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runGit } from "./git-service";
@@ -30,34 +30,50 @@ function countSpawns(fn: () => unknown): number {
   return n;
 }
 
+const NX = ["--no-ext-diff", "--no-textconv"];
+
 test("diffArgs: worktree 三档各自映射", () => {
   expect(diffArgs({ kind: "worktree", stage: "all" }, true)!.numstat)
-    .toEqual(["diff", "HEAD", "--numstat", "--find-renames"]);
+    .toEqual(["diff", ...NX, "HEAD", "--numstat", "--find-renames"]);
   expect(diffArgs({ kind: "worktree", stage: "staged" }, true)!.body)
-    .toEqual(["diff", "--cached", "--find-renames"]);
+    .toEqual(["diff", ...NX, "--cached", "--find-renames"]);
   expect(diffArgs({ kind: "worktree", stage: "unstaged" }, true)!.body)
-    .toEqual(["diff", "--find-renames"]);
+    .toEqual(["diff", ...NX, "--find-renames"]);
 });
 
-test("diffArgs: commit 用 show 且抹掉 format 头", () => {
+test("diffArgs: commit 用 show 且抹掉 format 头，revision 前有 --end-of-options", () => {
   const a = diffArgs({ kind: "commit", hash: "abc123" }, true)!;
-  expect(a.numstat).toEqual(["show", "abc123", "--numstat", "--format=", "--find-renames"]);
-  expect(a.body).toEqual(["show", "abc123", "--format=", "--find-renames"]);
+  expect(a.numstat).toEqual(["show", ...NX, "--format=", "--find-renames", "--numstat", "--end-of-options", "abc123"]);
+  expect(a.body).toEqual(["show", ...NX, "--format=", "--find-renames", "--end-of-options", "abc123"]);
 });
 
 test("diffArgs: range 用三点语义（相对分叉点）", () => {
   const a = diffArgs({ kind: "range", base: "main" }, true)!;
-  expect(a.numstat).toEqual(["diff", "main...HEAD", "--numstat", "--find-renames"]);
-  expect(a.body).toEqual(["diff", "main...HEAD", "--find-renames"]);
+  expect(a.numstat).toEqual(["diff", ...NX, "--numstat", "--find-renames", "--end-of-options", "main...HEAD"]);
+  expect(a.body).toEqual(["diff", ...NX, "--find-renames", "--end-of-options", "main...HEAD"]);
 });
 
 test("diffArgs: 空仓库时 all/staged 降级为 --cached，unstaged 回 null", () => {
   expect(diffArgs({ kind: "worktree", stage: "all" }, false)!.body)
-    .toEqual(["diff", "--cached", "--find-renames"]);
+    .toEqual(["diff", ...NX, "--cached", "--find-renames"]);
   expect(diffArgs({ kind: "worktree", stage: "staged" }, false)!.body)
-    .toEqual(["diff", "--cached", "--find-renames"]);
+    .toEqual(["diff", ...NX, "--cached", "--find-renames"]);
   // 没有 HEAD 就没有"已提交"这个参照，未暂存档无意义
   expect(diffArgs({ kind: "worktree", stage: "unstaged" }, false)).toBeNull();
+});
+
+test("gitReview: 以 - 开头的 revision 被拒绝且不会被 git 当作选项", () => {
+  const d = repo();
+  commit(d, "a.txt", "x\n", "init");
+  const out = join(d, "pwned.txt");
+  for (const bad of [`--output=${out}`, "-p", "--help"]) {
+    expect(() => gitReview(d, { kind: "commit", hash: bad })).toThrow("bad_revision");
+    expect(() => gitReview(d, { kind: "range", base: bad })).toThrow("bad_revision");
+  }
+  expect(() => gitReview(d, { kind: "commit", hash: "a b" })).toThrow("bad_revision");
+  expect(existsSync(out)).toBe(false);
+  expect(gitReview(d, { kind: "commit", hash: "HEAD" }).files.length).toBe(1);
+  rmSync(d, { recursive: true, force: true });
 });
 
 test("hasHead: 空仓库 false，有提交后 true", () => {

@@ -1,8 +1,8 @@
 import { test, expect } from "bun:test";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, existsSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runGit, isRepo, gitLog, gitBranches, gitStatus, mapStatusChar } from "./git-service";
+import { runGit, isRepo, gitLog, gitBranches, gitStatus, mapStatusChar, isSafeRevision } from "./git-service";
 
 function repo(): string {
   const d = mkdtempSync(join(tmpdir(), "ps-git-"));
@@ -102,4 +102,23 @@ test("gitStatus keeps CJK filenames unescaped (core.quotepath=false)", () => {
   const paths = r.files.map((f) => f.path);
   expect(paths).toContain("中文文件.txt"); // not the octal-escaped "\344\270..."
   rmSync(d, { recursive: true, force: true });
+});
+
+test("isSafeRevision accepts refs and shas, rejects options and ranges", () => {
+  for (const ok of ["HEAD", "HEAD~3", "main", "origin/main", "v1.0.0", "abc123def", "@{u}", "feat/x^"]) expect(isSafeRevision(ok)).toBe(true);
+  for (const bad of ["", "-p", "--output=/tmp/x", "a b", "a..b", "a\nb", "x".repeat(300)]) expect(isSafeRevision(bad)).toBe(false);
+});
+
+test("runGit does not execute a planted core.fsmonitor", () => {
+  const d = repo();
+  commit(d, "a.txt", "x\n", "init");
+  const marker = join(d, "..", `ps-marker-${Date.now()}`);
+  const hook = join(d, "..", `ps-hook-${Date.now()}.sh`);
+  writeFileSync(hook, `#!/bin/sh\ntouch "${marker}"\n`);
+  chmodSync(hook, 0o755);
+  runGit(d, ["config", "core.fsmonitor", hook]);
+  writeFileSync(join(d, "a.txt"), "changed\n");
+  expect(gitStatus(d).files).toEqual([{ path: "a.txt", status: "M" }]);
+  expect(existsSync(marker)).toBe(false);
+  rmSync(d, { recursive: true, force: true }); rmSync(hook, { force: true });
 });

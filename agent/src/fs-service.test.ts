@@ -577,3 +577,38 @@ test.skipIf(!bsdtarAvailable)("fsArchive produces a zip whose CJK filenames extr
   expect(ex(join(outDir, "项目", "说明.md"))).toBe(true);
   expect(rf(join(outDir, "项目", "说明.md"), "utf8")).toBe("内容");
 });
+
+test("fsRead refuses non-regular files", () => {
+  expect(() => fsRead("/dev/zero")).toThrow("enotfile");
+  const d = tmp();
+  const fifo = join(d, "pipe");
+  Bun.spawnSync(["mkfifo", fifo]);
+  expect(() => fsRead(fifo)).toThrow("enotfile");
+  expect(() => fsRead(d)).toThrow("enotfile");
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("fsRead reads at most the byte cap of a large file", () => {
+  const d = tmp();
+  const f = join(d, "big.txt");
+  writeFileSync(f, "a".repeat(5 * 1024 * 1024));
+  const r = fsRead(f, { maxBytes: 1000 });
+  expect(r.content.length).toBe(1000);
+  expect(r.truncated).toBe(true);
+  writeFileSync(f, "a".repeat(1000));
+  expect(fsRead(f, { maxBytes: 1000 }).truncated).toBeUndefined();
+  rmSync(d, { recursive: true, force: true });
+});
+
+test("fsTree does not execute a planted core.fsmonitor", () => {
+  const d = tmp();
+  runGit(d, ["init", "-q"]);
+  const marker = join(d, "marker");
+  const hook = join(tmpdir(), `ps-fsm-${Date.now()}.sh`);
+  writeFileSync(hook, `#!/bin/sh\ntouch "${marker}"\n`, { mode: 0o755 });
+  runGit(d, ["config", "core.fsmonitor", hook]);
+  writeFileSync(join(d, "a.txt"), "x");
+  fsTree(d);
+  expect(existsSync(marker)).toBe(false);
+  rmSync(d, { recursive: true, force: true }); rmSync(hook, { force: true });
+});

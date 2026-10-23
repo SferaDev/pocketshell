@@ -10,12 +10,20 @@ export function runGit(cwd: string, args: string[]): { ok: boolean; stdout: stri
   // core.quotepath=false: keep non-ASCII (CJK) paths verbatim in UTF-8 instead
   // of git's default C-style octal escaping ("\346..."), which the file/git
   // panel would otherwise render as mojibake.
-  const res = Bun.spawnSync(["git", "-c", "core.quotepath=false", "-C", cwd, ...args]);
+  // core.fsmonitor=false: a planted repo config would otherwise run its fsmonitor
+  // command on every status, i.e. just from browsing into the directory.
+  const res = Bun.spawnSync(["git", "-c", "core.quotepath=false", "-c", "core.fsmonitor=false", "-C", cwd, ...args]);
   return {
     ok: res.exitCode === 0,
     stdout: new TextDecoder().decode(res.stdout),
     stderr: new TextDecoder().decode(res.stderr),
   };
+}
+
+// Client-supplied revisions: a ref/sha-like token that cannot be read as an option.
+const SAFE_REVISION = /^[A-Za-z0-9_@][A-Za-z0-9_.\/@{}^~+-]{0,254}$/;
+export function isSafeRevision(rev: string): boolean {
+  return SAFE_REVISION.test(rev) && !rev.includes("..");
 }
 
 export function isRepo(cwd: string): boolean {
