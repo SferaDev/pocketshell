@@ -8,6 +8,7 @@ import { ChannelWatchdog } from "./channel-watchdog";
 import { toB64 } from "./bytes";
 import { cjkFallbackLang } from "./pty-env";
 import type { SessionMeta, TermHistoryResult } from "./protocol";
+import { loadAdopted, saveAdopted } from "./adopted-store";
 
 // Sanity bound for capture()'s `back`. Generous next to tmux's default
 // history-limit (2000) so a legitimate anchor is never rejected, small enough
@@ -148,9 +149,12 @@ export class TerminalService {
   // UTF-8 LANG to seed into new tmux sessions when the agent's own env has no
   // locale (see ensure() for why this must land on the server, not the client).
   private langFallback: string | null;
+  // Where the adopted set is persisted; unset (tests, embedders) disables it.
+  private adoptedFile: string | null;
 
-  constructor(deps: { tmux?: TmuxRunner; tmuxAsync?: AsyncTmuxRunner; langFallback?: string | null; now?: () => number } = {}) {
+  constructor(deps: { tmux?: TmuxRunner; tmuxAsync?: AsyncTmuxRunner; langFallback?: string | null; now?: () => number; adoptedFile?: string } = {}) {
     this.clock = deps.now ?? Date.now;
+    this.adoptedFile = deps.adoptedFile ?? null;
     this.tmux = deps.tmux ?? defaultTmux;
     // Tests that inject only the sync fake get it wrapped, keeping the async
     // probe paths hermetic; production (no injected runner) gets real
@@ -193,9 +197,33 @@ export class TerminalService {
       for (const line of new TextDecoder().decode(res.stdout).split("\n")) {
         const [name, piped] = line.split("\t");
         if (!name || piped !== "1") continue;
+        // A restored session already opened its own pipe; closing it here would silence it.
+        if (this.sessions.has(name)) continue;
         await this.tmuxAsync(["pipe-pane", "-t", name]);
       }
     } catch { /* 没有 tmux / 没有会话：启动路径不因此失败 */ }
+  }
+
+  private persistAdopted(): void {
+    if (!this.adoptedFile) return;
+    try {
+      saveAdopted(this.adoptedFile, [...this.sessions.values()].map(({ meta }) => (
+        { name: meta.name, cols: meta.cols, rows: meta.rows, createdAt: meta.createdAt }
+      )));
+    } catch { /* a read-only keyDir must not break session handling */ }
+  }
+
+  /** Re-adopt persisted sessions that still exist; call once after construction. */
+  restoreAdopted(): void {
+    if (!this.adoptedFile) return;
+    try {
+      for (const e of loadAdopted(this.adoptedFile)) {
+        if (this.sessions.has(e.name) || !this.hasSession(e.name)) continue;
+        this.adopt(e.name, e.cols, e.rows, e.createdAt, false);
+        this.reclaimPinnedWindow(e.name);
+      }
+    } catch { /* boot must never fail on a bad adopted file */ }
+    this.persistAdopted();
   }
 
   onOutput(cb: (name: string, chunk: Uint8Array) => void): void {
@@ -655,7 +683,7 @@ export class TerminalService {
   // 而我们重连时又要塞 capture-pane 快照，两套行网格一错开，tmux 的绝对定位就把
   // 手机上的内容覆盖掉 —— 「终端中间丢行」的根因。详见 pane-channel.ts 头部。
   // 现在改成 pipe-pane 取窗格原始字节（相对定位、无备用屏），输入走 send-keys。
-  private openChannel(name: string, cols: number, rows: number): PtyHandle {
+  private openChannel(name: string, cols: number, rows: number, resize = true): PtyHandle {
     const ch = new PaneChannel(name, { tmux: this.tmux, tmuxAsync: this.tmuxAsync });
     ch.onData((chunk) => {
       const live = this.sessions.get(name);
@@ -663,8 +691,10 @@ export class TerminalService {
       for (const cb of this.outputCbs) cb(name, chunk);
     });
     ch.onExit((code) => this.onPtyExit(name, code));
-    ch.resize(cols, rows);
-    this.markPinned(name);
+    if (resize) {
+      ch.resize(cols, rows);
+      this.markPinned(name);
+    }
     return ch;
   }
 
@@ -683,6 +713,15 @@ export class TerminalService {
     targets.add(id || name);
     this.pinned.set(name, targets);
     this.yielded.delete(name);
+  }
+
+  // A window left at window-size=manual was pinned by the agent before a restart; track it
+  // again as if a phone used it now, so the next real client activity hands it back.
+  private reclaimPinnedWindow(name: string): void {
+    const res = this.tmux(["show-options", "-wv", "-t", paneTarget(name), "window-size"]);
+    if (res.exitCode !== 0 || new TextDecoder().decode(res.stdout).trim() !== "manual") return;
+    this.markPinned(name);
+    this.phoneUse.set(name, { at: this.clock(), device: "" });
   }
 
   // Stamp a real phone use (input, resize, attach, activation); re-pin at the device's size if we yielded.
@@ -739,6 +778,7 @@ export class TerminalService {
       if (now - (live.lastReattachAt ?? 0) < 500) {
         this.sessions.delete(name);
         this.states.delete(name);
+        this.persistAdopted();
         for (const cb of this.exitCbs) cb(name, code);
         this.emitSessionsChange();
         return;
@@ -762,6 +802,7 @@ export class TerminalService {
     this.sessions.delete(name);
     this.states.delete(name);
     this.dropWindowState(name);
+    this.persistAdopted();
     for (const cb of this.exitCbs) cb(name, code);
     this.emitSessionsChange();
   }
@@ -832,6 +873,10 @@ export class TerminalService {
     // clean 1:1 with xterm's rows and there is no periodic redraw.
     this.tmux(["set-option", "-g", "status", "off"]);
 
+    this.adopt(name, cols, rows, Date.now(), true);
+  }
+
+  private adopt(name: string, cols: number, rows: number, createdAt: number, resize: boolean): void {
     const meta: SessionMeta = {
       name,
       kind: "tmux",
@@ -839,12 +884,13 @@ export class TerminalService {
       cols,
       rows,
       lastLine: "",
-      createdAt: Date.now(),
+      createdAt,
       attached: true,
     };
-    const pty = this.openChannel(name, cols, rows);
+    const pty = this.openChannel(name, cols, rows, resize);
     this.sessions.set(name, { pty, meta, lastOutputAt: Date.now() });
     this.states.set(name, new StateHysteresis("run"));
+    this.persistAdopted();
     this.emitSessionsChange();
   }
 
@@ -878,8 +924,10 @@ export class TerminalService {
   resize(name: string, cols: number, rows: number): void {
     const live = this.sessions.get(name);
     if (!live) return;
+    const changed = live.meta.cols !== cols || live.meta.rows !== rows;
     live.meta.cols = cols;
     live.meta.rows = rows;
+    if (changed) this.persistAdopted();
     live.pty.resize(cols, rows);
     this.tmux(["resize-window", "-t", name, "-x", String(cols), "-y", String(rows)]);
     this.markPinned(name);
@@ -891,6 +939,7 @@ export class TerminalService {
     this.sessions.delete(name);
     this.states.delete(name);
     this.dropWindowState(name);
+    this.persistAdopted();
     this.tmux(["kill-session", "-t", name]);
     this.emitSessionsChange();
   }
@@ -929,6 +978,7 @@ export class TerminalService {
     const m = this.states.get(name);
     this.states.delete(name);
     if (m) this.states.set(newName, m);
+    this.persistAdopted();
     // Re-wire the PTY so its onData/onExit closures capture the new name;
     // otherwise output for this session keeps being emitted under the old name
     // and the client (now keyed by the new name) receives nothing.

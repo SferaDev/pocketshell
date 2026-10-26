@@ -8,6 +8,8 @@
 // importing back would close a cycle.
 import { loadConfig, buildPairingString, resolveAdvertise, advertiseToHttp, type AgentConfig } from "./config";
 import { toB64 } from "./bytes";
+import { TerminalService } from "./terminal";
+import { adoptedFilePath } from "./adopted-store";
 import { ensureTmux, realTmuxDeps } from "./ensure-tmux";
 import { buildReadiness, isNonLocalBind } from "./readiness";
 import { runWarmup } from "./warmup";
@@ -23,7 +25,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 /** Just enough of startServer's shape for the boot branch (avoids an import cycle). */
-export type StartServerFn = (deps: { config: AgentConfig }) => unknown;
+export type StartServerFn = (deps: { config: AgentConfig; terminal?: TerminalService }) => unknown;
 
 // req 7-1: `pocketshell-agent devices|pair` CLI subcommands. Pure helpers from
 // cli-devices.ts wired to loadConfig()/registry/pairing; never boots the server.
@@ -223,7 +225,9 @@ export function runBoot(startServer: StartServerFn): void {
   ensureTmux(realTmuxDeps());
   const advertise = resolveAdvertise(cfg);
   const appUrl = advertiseToHttp(advertise);
-  startServer({ config: cfg });
+  const terminal = new TerminalService({ adoptedFile: adoptedFilePath(cfg.keyDir) });
+  terminal.restoreAdopted();
+  startServer({ config: cfg, terminal });
   const pairingString =
     cfg.pairingMode && cfg.pairing
       ? buildPairingString(cfg.identity.publicKey, advertise, cfg.pairing.code)
