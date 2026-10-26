@@ -144,7 +144,7 @@
   const notice = $derived(!DEMO && !getAgentPubKey() ? $t("app.notice.noPubkey") : flash);
   const demo = DEMO ? createDemoConnection(wsUrl) : null;
   const conn = demo ? demo.conn : new Connection({ url: wsUrl });
-  let streamPolicy = $state<StreamPolicyState>({ current: null, grace: null });
+  let streamPolicy = $state<StreamPolicyState>({ current: null, recent: [], grace: null });
   let streamingSessions = $state<Set<string>>(new Set());
   let graceDetachTimer: ReturnType<typeof setTimeout> | null = null;
   let graceGeneration = 0;
@@ -217,6 +217,7 @@
     invalidateGraceDetach();
     streamPolicy = {
       current: streamPolicy.current === sessionId ? nextSessionId : streamPolicy.current,
+      recent: streamPolicy.recent.map((id) => id === sessionId ? nextSessionId : id),
       grace: streamPolicy.grace === sessionId ? nextSessionId : streamPolicy.grace,
     };
     streamingSessions = new Set([...streamingSessions].map((id) => id === sessionId ? nextSessionId : id));
@@ -229,6 +230,7 @@
     invalidateGraceDetach();
     streamPolicy = {
       current: streamPolicy.current && alive.has(streamPolicy.current) ? streamPolicy.current : null,
+      recent: streamPolicy.recent.filter((id) => alive.has(id)),
       grace: streamPolicy.grace && alive.has(streamPolicy.grace) ? streamPolicy.grace : null,
     };
     const before = streamingSessions.size;

@@ -127,7 +127,7 @@ afterEach(() => {
   localStorage.clear();
 });
 
-test("file-tab grace stays streaming through 1999ms and detaches at 2000ms", async () => {
+test("a terminal left for a file tab keeps streaming", async () => {
   const { getByTestId } = await mountApp();
   expect(getByTestId("terminal-A")).toHaveAttribute("data-active", "true");
   expect(getByTestId("terminal-A")).toHaveAttribute("data-streaming", "true");
@@ -136,17 +136,34 @@ test("file-tab grace stays streaming through 1999ms and detaches at 2000ms", asy
   await tick();
   expect(getByTestId("file-/tmp/a.ts")).toHaveAttribute("data-active", "true");
   expect(getByTestId("terminal-A")).toHaveAttribute("data-active", "false");
+
+  await vi.advanceTimersByTimeAsync(10_000);
+  await tick();
+  expect(appControl.conn.detach).not.toHaveBeenCalled();
+  expect(getByTestId("terminal-A")).toHaveAttribute("data-streaming", "true");
+});
+
+test("the terminal that falls out of the recent set streams through 1999ms and detaches at 2000ms", async () => {
+  const { getByTestId } = await mountApp();
+  appControl.conn.emitSessions([session("A"), session("B"), session("C"), session("D")]);
+  await tick();
+  for (const id of ["B", "C", "D"]) {
+    appControl.helpers.enterSession(id);
+    await tick();
+  }
+  expect(getByTestId("terminal-D")).toHaveAttribute("data-active", "true");
+  for (const id of ["B", "C"]) expect(getByTestId(`terminal-${id}`)).toHaveAttribute("data-streaming", "true");
   expect(getByTestId("terminal-A")).toHaveAttribute("data-streaming", "true");
 
   await vi.advanceTimersByTimeAsync(1999);
   await tick();
   expect(appControl.conn.detach).not.toHaveBeenCalled();
-  expect(getByTestId("terminal-A")).toHaveAttribute("data-streaming", "true");
 
   await vi.advanceTimersByTimeAsync(1);
   await tick();
   expect(appControl.conn.detach).toHaveBeenCalledWith("A");
   expect(getByTestId("terminal-A")).toHaveAttribute("data-streaming", "false");
+  for (const id of ["B", "C"]) expect(getByTestId(`terminal-${id}`)).toHaveAttribute("data-streaming", "true");
 });
 
 test("entering a background task from a file tab makes that terminal visible and streaming", async () => {
@@ -159,7 +176,7 @@ test("entering a background task from a file tab makes that terminal visible and
 
   expect(getByTestId("file-/tmp/a.ts")).toHaveAttribute("data-active", "false");
   expect(getByTestId("terminal-A")).toHaveAttribute("data-active", "false");
-  expect(getByTestId("terminal-A")).toHaveAttribute("data-streaming", "false");
+  expect(getByTestId("terminal-A")).toHaveAttribute("data-streaming", "true");
   expect(getByTestId("terminal-B")).toHaveAttribute("data-active", "true");
   expect(getByTestId("terminal-B")).toHaveAttribute("data-streaming", "true");
 });
@@ -175,7 +192,7 @@ test("creating a session from a file tab makes the new terminal visible and stre
 
   expect(getByTestId("file-/tmp/a.ts")).toHaveAttribute("data-active", "false");
   expect(getByTestId("terminal-A")).toHaveAttribute("data-active", "false");
-  expect(getByTestId("terminal-A")).toHaveAttribute("data-streaming", "false");
+  expect(getByTestId("terminal-A")).toHaveAttribute("data-streaming", "true");
   expect(getByTestId("terminal-C")).toHaveAttribute("data-active", "true");
   expect(getByTestId("terminal-C")).toHaveAttribute("data-streaming", "true");
 });

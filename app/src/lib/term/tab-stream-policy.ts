@@ -1,7 +1,12 @@
 export const TAB_DETACH_GRACE_MS = 2_000;
+// Recently used terminals, besides the current one, that keep streaming with
+// no timer: switching back to one never pays a history reseed.
+export const KEEP_RECENT_STREAMS = 2;
 
 export interface StreamPolicyState {
   current: string | null;
+  // Most recent first, at most KEEP_RECENT_STREAMS.
+  recent: string[];
   grace: string | null;
 }
 
@@ -20,24 +25,33 @@ export interface StreamStop {
 }
 
 function streamIds(state: StreamPolicyState): string[] {
-  return [...new Set([state.current, state.grace].filter((id): id is string => id !== null))];
+  return [...new Set([state.current, ...state.recent, state.grace].filter((id): id is string => id !== null))];
 }
 
 export function switchStream(
   previous: StreamPolicyState,
   nextTerminal: string | null,
+  keepRecent = KEEP_RECENT_STREAMS,
 ): StreamTransition {
   if (nextTerminal === previous.current) {
     return { state: previous, stream: [], detachNow: [], scheduleDetach: null };
   }
 
-  const oldCurrent = previous.current;
-  const oldGrace = previous.grace;
-  const grace = oldCurrent && oldCurrent !== nextTerminal ? oldCurrent : null;
-  const state = { current: nextTerminal, grace };
-  const detachNow = oldGrace && oldGrace !== nextTerminal && oldGrace !== oldCurrent
-    ? [oldGrace]
-    : [];
+  const used = [...new Set([previous.current, ...previous.recent])]
+    .filter((id): id is string => id !== null && id !== nextTerminal);
+  const recent = used.slice(0, keepRecent);
+  const evicted = used.slice(keepRecent);
+  const oldGrace = previous.grace !== null && previous.grace !== nextTerminal && !recent.includes(previous.grace)
+    ? previous.grace
+    : null;
+  // The tab that just fell out of the recent set gets the grace window; a tab
+  // already in grace keeps it only while nothing newer needs the slot.
+  const grace = evicted[0] ?? oldGrace;
+  const detachNow = [
+    ...(oldGrace !== null && oldGrace !== grace ? [oldGrace] : []),
+    ...evicted.slice(1),
+  ];
+  const state = { current: nextTerminal, recent, grace };
 
   return {
     state,
@@ -48,7 +62,7 @@ export function switchStream(
 }
 
 export function stopStream(previous: StreamPolicyState, sessionId: string): StreamStop {
-  if (previous.current !== sessionId && previous.grace !== sessionId) {
+  if (previous.current !== sessionId && previous.grace !== sessionId && !previous.recent.includes(sessionId)) {
     return {
       state: previous,
       stream: [],
@@ -59,6 +73,7 @@ export function stopStream(previous: StreamPolicyState, sessionId: string): Stre
 
   const state = {
     current: previous.current === sessionId ? null : previous.current,
+    recent: previous.recent.filter((id) => id !== sessionId),
     grace: previous.grace === sessionId ? null : previous.grace,
   };
 
