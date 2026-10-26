@@ -207,7 +207,7 @@ export class PaneChannel implements PtyHandle {
 
   resize(cols: number, rows: number): void {
     if (this.closed) return;
-    this.deps.tmux(["resize-window", "-t", this.session, "-x", String(cols), "-y", String(rows)]);
+    void this.deps.tmuxAsync(["resize-window", "-t", this.session, "-x", String(cols), "-y", String(rows)]);
   }
 
   /** 把读进程的 stdout 抽干并分发。读进程退出即通道失效（正常情况下它不会退出）。 */

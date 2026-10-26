@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TerminalService, withCursorFix, type TmuxResult, type TmuxRunner } from "./terminal";
 import { PaneChannel, fifoName } from "./pane-channel";
+import { CONTROL_SESSION } from "./tmux-control";
 
 // 单测不得往用户真实家目录里造 FIFO：把窗格通道的运行目录指到临时目录。
 // 必须在任何 TerminalService 构造之前设置（PaneChannel 在构造时读它）。
@@ -64,6 +65,15 @@ test("list() surfaces foreign tmux sessions as idle + attached:false", async () 
   expect(work.rows).toBe(40);
   expect(work.createdAt).toBe(1700000000 * 1000);
   expect(work.lastLine).toBe("$ vim main.ts");
+});
+
+test("list() hides the agent's own control-mode session", async () => {
+  const term = new TerminalService({
+    tmux: fakeTmux({ list: `work\t1700000000\t120\t40\n${CONTROL_SESSION}\t1700000100\t80\t24\n` }),
+  });
+  const sessions = await term.list();
+  term.dispose();
+  expect(sessions.map((s) => s.name)).toEqual(["work"]);
 });
 
 test("list() tolerates a missing/failing tmux (roster query) -> empty", async () => {
@@ -615,9 +625,9 @@ test.skipIf(!hasTmux)("releaseWindow() returns window-size to unset on a real tm
   try {
     svc.ensure(NAME, { cols: 80, rows: 24 });
     svc.resize(NAME, 72, 35);
-    expect(winSize()).toBe("manual");
+    expect(await waitFor(() => winSize() === "manual")).toBe(true);
     svc.releaseWindow(NAME);
-    expect(winSize()).toBe("");
+    expect(await waitFor(() => winSize() === "")).toBe(true);
   } finally {
     await svc.kill(NAME);
     svc.dispose();

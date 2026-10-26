@@ -9,6 +9,7 @@ import { toB64 } from "./bytes";
 import { cjkFallbackLang } from "./pty-env";
 import type { SessionMeta, TermHistoryResult } from "./protocol";
 import { loadAdopted, saveAdopted } from "./adopted-store";
+import { CONTROL_SESSION, TmuxControl } from "./tmux-control";
 
 // Sanity bound for capture()'s `back`. Generous next to tmux's default
 // history-limit (2000) so a legitimate anchor is never rejected, small enough
@@ -125,6 +126,8 @@ export class TerminalService {
   // Async runner for the hot probe paths (scanner, list, RPC queries). The sync
   // runner stays for one-shot control calls (ensure, rename, kill, ...).
   private tmuxAsync: AsyncTmuxRunner;
+  // Persistent `tmux -C` client behind tmuxAsync in production; null when runners are injected.
+  private control: TmuxControl | null = null;
   private pinned = new Map<string, Set<string>>();
   private windowIds = new Map<string, string>();
   // Last real phone use per session, and each device's last known size, for last-device-wins sizing.
@@ -157,10 +160,14 @@ export class TerminalService {
     this.adoptedFile = deps.adoptedFile ?? null;
     this.tmux = deps.tmux ?? defaultTmux;
     // Tests that inject only the sync fake get it wrapped, keeping the async
-    // probe paths hermetic; production (no injected runner) gets real
-    // non-blocking spawns via defaultTmuxAsync.
+    // probe paths hermetic; production (no injected runner) goes through the
+    // control client, which falls back to defaultTmuxAsync spawns. The client
+    // only runs while sessions are owned, so it never outlives the user's tmux use.
+    if (!deps.tmux && !deps.tmuxAsync) {
+      this.control = new TmuxControl({ fallback: defaultTmuxAsync, enabled: () => this.sessions.size > 0 });
+    }
     this.tmuxAsync =
-      deps.tmuxAsync ?? (deps.tmux ? async (args) => deps.tmux!(args) : defaultTmuxAsync);
+      deps.tmuxAsync ?? (deps.tmux ? async (args) => deps.tmux!(args) : this.control!.run);
     // `??` would treat an explicit `null` (tests asserting "no fallback") the
     // same as "omitted" and recompute a default — check presence instead so
     // callers can deliberately force no LANG injection.
@@ -196,7 +203,7 @@ export class TerminalService {
       if (res.exitCode !== 0) return;
       for (const line of new TextDecoder().decode(res.stdout).split("\n")) {
         const [name, piped] = line.split("\t");
-        if (!name || piped !== "1") continue;
+        if (!name || piped !== "1" || name === CONTROL_SESSION) continue;
         // A restored session already opened its own pipe; closing it here would silence it.
         if (this.sessions.has(name)) continue;
         await this.tmuxAsync(["pipe-pane", "-t", name]);
@@ -769,7 +776,7 @@ export class TerminalService {
     if (!targets) return;
     this.pinned.delete(name);
     this.yielded.add(name);
-    for (const t of targets) this.tmux(["set-option", "-uw", "-t", t, "window-size"]);
+    for (const t of targets) void this.tmuxAsync(["set-option", "-uw", "-t", t, "window-size"]);
   }
 
   // tmux session is the source of truth: a dead PTY may just be a detach.
@@ -810,6 +817,7 @@ export class TerminalService {
     this.states.delete(name);
     this.dropWindowState(name);
     this.persistAdopted();
+    if (this.sessions.size === 0) this.control?.close();
     for (const cb of this.exitCbs) cb(name, code);
     this.emitSessionsChange();
   }
@@ -947,6 +955,7 @@ export class TerminalService {
     this.dropWindowState(name);
     this.persistAdopted();
     this.tmux(["kill-session", "-t", name]);
+    if (this.sessions.size === 0) this.control?.close();
     this.emitSessionsChange();
   }
 
@@ -1020,6 +1029,7 @@ export class TerminalService {
         const parts = l.split("\t");
         if (parts.length < 4) return null;
         const [name, created, width, height] = parts;
+        if (name === CONTROL_SESSION) return null;
         return {
           name,
           createdAt: (Number(created) || 0) * 1000,
@@ -1070,5 +1080,6 @@ export class TerminalService {
     for (const l of this.sessions.values()) l.pty.kill();
     this.sessions.clear();
     this.states.clear();
+    this.control?.dispose();
   }
 }
