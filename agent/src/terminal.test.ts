@@ -561,13 +561,47 @@ test("releaseWindow() unsets every window the agent pinned and tolerates a gone 
   });
   term.ensure("work", { cols: 80, rows: 24 });
   id = "@2";
-  term.resize("work", 72, 35);
+  term.rename("work", "play"); // drops the cached id, so the next pin re-queries
+  term.resize("play", 72, 35);
   calls.length = 0;
-  expect(() => term.releaseWindow("work")).not.toThrow();
+  expect(() => term.releaseWindow("play")).not.toThrow();
   expect(calls).toEqual([
     ["set-option", "-uw", "-t", "@1", "window-size"],
     ["set-option", "-uw", "-t", "@2", "window-size"],
   ]);
+  term.dispose();
+});
+
+test("resize() issues one resize-window and looks the window id up once per session", () => {
+  const calls: string[][] = [];
+  const term = new TerminalService({
+    tmux: (args) => { calls.push(args); return args[0] === "display-message" ? ok("@3\n") : ok(); },
+  });
+  term.ensure("work", { cols: 80, rows: 24 });
+  calls.length = 0;
+  term.resize("work", 72, 35);
+  term.resize("work", 70, 30);
+  expect(calls.filter((a) => a[0] === "resize-window")).toEqual([
+    ["resize-window", "-t", "work", "-x", "72", "-y", "35"],
+    ["resize-window", "-t", "work", "-x", "70", "-y", "30"],
+  ]);
+  expect(calls.filter((a) => a[0] === "display-message")).toEqual([]);
+  term.dispose();
+});
+
+test("kill() forgets the cached window id so a recreated session is looked up again", async () => {
+  let id = "@1";
+  const calls: string[][] = [];
+  const term = new TerminalService({
+    tmux: (args) => { calls.push(args); return args[0] === "display-message" ? ok(`${id}\n`) : ok(); },
+  });
+  term.ensure("work", { cols: 80, rows: 24 });
+  await term.kill("work");
+  id = "@9";
+  term.ensure("work", { cols: 80, rows: 24 });
+  calls.length = 0;
+  term.releaseWindow("work");
+  expect(calls).toEqual([["set-option", "-uw", "-t", "@9", "window-size"]]);
   term.dispose();
 });
 

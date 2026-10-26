@@ -126,6 +126,7 @@ export class TerminalService {
   // runner stays for one-shot control calls (ensure, rename, kill, ...).
   private tmuxAsync: AsyncTmuxRunner;
   private pinned = new Map<string, Set<string>>();
+  private windowIds = new Map<string, string>();
   // Last real phone use per session, and each device's last known size, for last-device-wins sizing.
   private phoneUse = new Map<string, { at: number; device: string }>();
   private phoneSizes = new Map<string, Map<string, { cols: number; rows: number }>>();
@@ -362,6 +363,7 @@ export class TerminalService {
     try {
       live.pty.kill();
       const meta = live.meta;
+      this.windowIds.delete(name);
       live.pty = this.openChannel(name, meta.cols, meta.rows);
       this.onDiag?.({ tag: name, kind: "chan-watchdog", phase: "rebuilt" });
     } catch (e) {
@@ -698,6 +700,7 @@ export class TerminalService {
   }
 
   private dropWindowState(name: string): void {
+    this.windowIds.delete(name);
     this.pinned.delete(name);
     this.yielded.delete(name);
     this.phoneUse.delete(name);
@@ -706,8 +709,12 @@ export class TerminalService {
 
   // resize-window leaves window-size=manual on the window; remember which windows we pinned.
   private markPinned(name: string): void {
-    const res = this.tmux(["display-message", "-p", "-t", name, "#{window_id}"]);
-    const id = res.exitCode === 0 ? new TextDecoder().decode(res.stdout).trim() : "";
+    let id = this.windowIds.get(name);
+    if (id === undefined) {
+      const res = this.tmux(["display-message", "-p", "-t", name, "#{window_id}"]);
+      id = res.exitCode === 0 ? new TextDecoder().decode(res.stdout).trim() : "";
+      if (id) this.windowIds.set(name, id);
+    }
     const targets = this.pinned.get(name) ?? new Set<string>();
     targets.add(id || name);
     this.pinned.set(name, targets);
@@ -787,6 +794,7 @@ export class TerminalService {
       // 开着，它的流就悬在被删掉的旧 inode 上，永远收不到字节（见 scanAsync 的
       // 纪律 2）。
       live.pty.kill();
+      this.windowIds.delete(name);
       live.pty = this.openChannel(name, live.meta.cols, live.meta.rows);
       return;
     }
@@ -928,7 +936,6 @@ export class TerminalService {
     live.meta.rows = rows;
     if (changed) this.persistAdopted();
     live.pty.resize(cols, rows);
-    this.tmux(["resize-window", "-t", name, "-x", String(cols), "-y", String(rows)]);
     this.markPinned(name);
   }
 
@@ -965,6 +972,7 @@ export class TerminalService {
     live.meta.name = newName;
     this.sessions.delete(name);
     this.sessions.set(newName, live);
+    this.windowIds.delete(name);
     const pinnedTargets = this.pinned.get(name);
     this.pinned.delete(name);
     if (pinnedTargets) this.pinned.set(newName, pinnedTargets);
