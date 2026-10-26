@@ -73,7 +73,15 @@ interface TmuxRosterEntry {
   createdAt: number;
   cols: number;
   rows: number;
+  // Active pane of the session's current window; absent when tmux did not report them.
+  windowId?: string;
+  historySize?: number;
+  activity?: number; // window_activity, seconds
+  cursor?: string;
 }
+
+const optNum = (v: string | undefined): number | undefined =>
+  v !== undefined && v !== "" && Number.isFinite(Number(v)) ? Number(v) : undefined;
 
 // Default runner: spawn real tmux. Resilient to a missing binary (returns a
 // non-zero result instead of throwing) so callers degrade gracefully and unit
@@ -130,6 +138,8 @@ export class TerminalService {
   private control: TmuxControl | null = null;
   private pinned = new Map<string, Set<string>>();
   private windowIds = new Map<string, string>();
+  // Last preview per session, reused while tmux reports no change since it was captured.
+  private lastLines = new Map<string, { key: string; line: string; at: number }>();
   // Last real phone use per session, and each device's last known size, for last-device-wins sizing.
   private phoneUse = new Map<string, { at: number; device: string }>();
   private phoneSizes = new Map<string, Map<string, { cols: number; rows: number }>>();
@@ -272,9 +282,12 @@ export class TerminalService {
   private async scanAsync(): Promise<void> {
     const now = Date.now();
     const entries = [...this.sessions.entries()];
+    // One roster query answers liveness, window ids and history depth for every session.
+    const roster = entries.length ? await this.roster() : null;
+    const rows = roster ? new Map(roster.map((r) => [r.name, r])) : null;
     const probes = await Promise.all(
       entries.map(async ([name, live]) => {
-        const alive = await this.hasSessionAsync(name);
+        const alive = rows ? rows.has(name) : await this.hasSessionAsync(name);
         return {
           name,
           alive,
@@ -303,7 +316,10 @@ export class TerminalService {
       if (await this.hasSessionAsync(name)) continue; // 假死，放过
       this.reap(name, 0);
     }
-    await this.watchdogTick(now);
+    for (const [name, row] of rows ?? []) {
+      if (row.windowId && this.sessions.has(name)) this.windowIds.set(name, row.windowId);
+    }
+    await this.watchdogTick(now, rows ?? undefined);
     await this.arbitrateWindows();
     for (const { name, inferred } of probes) {
       if (!this.sessions.has(name)) continue; // killed/renamed while probing
@@ -329,7 +345,7 @@ export class TerminalService {
   // 旧 tee，closeIo 收掉旧 cat）→ openChannel 全新链路。tmux 的 pipe_offset
   // 在 pipe-pane 重开时续传（cmd-pipe-pane.c 不重置 wpo），堵在半路的字节会
   // 从新通道流出，不丢。守纪律：先 kill 再开（scanAsync 上方纪律 2）。
-  private async watchdogTick(now: number): Promise<void> {
+  private async watchdogTick(now: number, rows?: Map<string, TmuxRosterEntry>): Promise<void> {
     for (const [name, live] of this.sessions.entries()) {
       if (this.rebuilding.has(name)) continue;
       const ch = live.pty;
@@ -344,7 +360,9 @@ export class TerminalService {
       // history_size 探头不取（喂 null 让判定退化，省一次 spawn）。
       const silentMs = now - live.lastOutputAt;
       let historySize: number | null = null;
-      if (silentMs >= 5000) {
+      const known = rows?.get(name)?.historySize;
+      if (silentMs >= 5000 && known !== undefined) historySize = known;
+      else if (silentMs >= 5000) {
         const r = await this.tmuxAsync(["display-message", "-p", "-t", name, "#{history_size}"]);
         if (r.exitCode === 0) {
           const n = Number(new TextDecoder().decode(r.stdout).trim());
@@ -756,18 +774,24 @@ export class TerminalService {
 
   // Last device used wins: yield a pinned window once a real tmux client was active after the phone.
   async arbitrateWindows(): Promise<void> {
-    for (const name of [...this.pinned.keys()]) {
-      try {
+    const names = [...this.pinned.keys()].filter((n) => this.phoneUse.has(n));
+    if (names.length === 0) return;
+    try {
+      const res = await this.tmuxAsync(["-u", "list-clients", "-F", "#{client_activity}\t#{client_session}"]);
+      if (res.exitCode !== 0) return;
+      const latest = new Map<string, number>();
+      for (const line of new TextDecoder().decode(res.stdout).split("\n")) {
+        const tab = line.indexOf("\t");
+        const act = Number.parseInt(line.slice(0, tab), 10);
+        if (tab < 0 || !Number.isFinite(act)) continue;
+        const session = line.slice(tab + 1);
+        latest.set(session, Math.max(latest.get(session) ?? 0, act));
+      }
+      for (const name of names) {
         const use = this.phoneUse.get(name);
-        if (!use) continue;
-        const res = await this.tmuxAsync(["list-clients", "-t", name, "-F", "#{client_activity}"]);
-        if (res.exitCode !== 0) continue;
-        const latest = new TextDecoder().decode(res.stdout).split("\n")
-          .map((l) => Number.parseInt(l, 10)).filter((n) => Number.isFinite(n))
-          .reduce((a, b) => Math.max(a, b), 0);
-        if (latest > Math.floor(use.at / 1000) + CLIENT_ACTIVITY_MARGIN_S) this.releaseWindow(name);
-      } catch { /* never throw from the scanner */ }
-    }
+        if (use && (latest.get(name) ?? 0) > Math.floor(use.at / 1000) + CLIENT_ACTIVITY_MARGIN_S) this.releaseWindow(name);
+      }
+    } catch { /* never throw from the scanner */ }
   }
 
   // Hand the windows we pinned back to tmux's own sizing. Idempotent; a gone session is fine.
@@ -1003,8 +1027,8 @@ export class TerminalService {
     this.emitSessionsChange();
   }
 
-  // Whole-machine tmux roster (one spawn). Tab-separated; session names cannot
-  // contain a tab in practice, so a plain split is safe. Degrades to [] when
+  // Whole-machine tmux roster (one query). Tab-separated; session names cannot
+  // contain a tab in practice, so a plain split is safe. Returns null when
   // tmux is absent or the query fails.
   //
   // `-u` is REQUIRED, not cosmetic: without it, tmux under launchd (no LANG/LC_*
@@ -1012,14 +1036,16 @@ export class TerminalService {
   // every line fails the 4-field split and the whole roster comes back empty
   // (the "task panel is empty in production" bug). Same root cause as the
   // CJK-underscore fix on attach()/new-session. Do not remove `-u`.
-  private async roster(): Promise<TmuxRosterEntry[]> {
+  // Null when the query itself failed, as opposed to an empty server.
+  private async roster(): Promise<TmuxRosterEntry[] | null> {
     const res = await this.tmuxAsync([
       "-u",
       "list-sessions",
       "-F",
-      "#{session_name}\t#{session_created}\t#{window_width}\t#{window_height}",
+      "#{session_name}\t#{session_created}\t#{window_width}\t#{window_height}" +
+        "\t#{window_id}\t#{history_size}\t#{window_activity}\t#{cursor_x},#{cursor_y}",
     ]);
-    if (res.exitCode !== 0) return [];
+    if (res.exitCode !== 0) return null;
     return new TextDecoder()
       .decode(res.stdout)
       .split("\n")
@@ -1028,37 +1054,41 @@ export class TerminalService {
       .map((l): TmuxRosterEntry | null => {
         const parts = l.split("\t");
         if (parts.length < 4) return null;
-        const [name, created, width, height] = parts;
+        const [name, created, width, height, windowId, history, activity, cursor] = parts;
         if (name === CONTROL_SESSION) return null;
         return {
           name,
           createdAt: (Number(created) || 0) * 1000,
           cols: Number(width) || 80,
           rows: Number(height) || 24,
+          windowId: windowId || undefined,
+          historySize: optNum(history),
+          activity: optNum(activity),
+          cursor,
         };
       })
       .filter((e): e is TmuxRosterEntry => e !== null);
   }
 
-  // Async + concurrent (WP-3a): the roster spawn runs alongside per-session
-  // capture-pane probes (Promise.all), so a round costs ~1 spawn round-trip
-  // instead of 2S+1+F serialized spawnSyncs that blocked the event loop.
+  // Async + concurrent (WP-3a): one roster query, then the preview captures
+  // that are still needed run in parallel (Promise.all).
   // Owned sessions report the scanner-debounced state instead of re-probing
   // has-session per call: the 1s scanner already tracks liveness, and a fresh
   // raw inference here would reintroduce the run/wait flap the hysteresis
   // just filtered out.
   async list(): Promise<SessionMeta[]> {
-    const rosterP = this.roster();
+    const roster = (await this.roster()) ?? [];
+    const rows = new Map(roster.map((r) => [r.name, r]));
     const owned = await Promise.all(
       [...this.sessions.values()].map(async (l) => ({
         ...l.meta,
         state: this.states.get(l.meta.name)?.state ?? l.meta.state,
-        lastLine: await this.captureLastLine(l.meta.name),
+        lastLine: await this.lastLine(l.meta.name, rows.get(l.meta.name)),
         attached: true,
       })),
     );
     const foreign = await Promise.all(
-      (await rosterP)
+      roster
         .filter((r) => !this.sessions.has(r.name))
         .map(async (r) => ({
           name: r.name,
@@ -1066,12 +1096,27 @@ export class TerminalService {
           state: "idle" as const,
           cols: r.cols,
           rows: r.rows,
-          lastLine: await this.captureLastLine(r.name),
+          lastLine: await this.lastLine(r.name, r),
           createdAt: r.createdAt,
           attached: false,
         })),
     );
+    for (const name of [...this.lastLines.keys()]) {
+      if (!rows.has(name) && !this.sessions.has(name)) this.lastLines.delete(name);
+    }
     return [...owned, ...foreign];
+  }
+
+  // Capture only when the pane may have changed: same window, history, cursor and
+  // activity second, and that second strictly before the last capture began.
+  private async lastLine(name: string, r?: TmuxRosterEntry): Promise<string> {
+    const key = r?.activity !== undefined ? `${r.windowId}|${r.historySize}|${r.cursor}|${r.activity}` : null;
+    const cached = this.lastLines.get(name);
+    if (key !== null && cached?.key === key && (r?.activity ?? Infinity) < cached.at) return cached.line;
+    const at = Math.floor(this.clock() / 1000);
+    const line = await this.captureLastLine(name);
+    if (key !== null) this.lastLines.set(name, { key, line, at });
+    return line;
   }
 
   dispose(): void {

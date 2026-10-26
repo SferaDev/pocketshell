@@ -643,7 +643,8 @@ function sharedWindow(clientActivity: () => string) {
     tmux: (args) => { calls.push(args); return args[0] === "display-message" ? ok("@3\n") : ok(); },
     tmuxAsync: async (args) => {
       calls.push(args);
-      return args[0] === "list-clients" ? ok(clientActivity()) : ok();
+      if (!args.includes("list-clients")) return ok();
+      return ok(clientActivity().split("\n").filter(Boolean).map((l) => `${l}\twork\n`).join(""));
     },
   });
   term.ensure("work", { cols: 80, rows: 24 });
@@ -665,7 +666,7 @@ test("arbitrate: a real client active after the phone releases the window", asyn
   advance(5000);
   act = "105\n99\n";
   await term.arbitrateWindows();
-  expect(calls).toContainEqual(["list-clients", "-t", "work", "-F", "#{client_activity}"]);
+  expect(calls).toContainEqual(["-u", "list-clients", "-F", "#{client_activity}\t#{client_session}"]);
   expect(calls).toContainEqual(["set-option", "-uw", "-t", "@3", "window-size"]);
   term.dispose();
 });
@@ -891,16 +892,20 @@ test("scan() never stacks: a tick during an in-flight probe round is skipped", a
   let inFlight = 0;
   let maxInFlight = 0;
   const tmuxAsync = async (args: string[]): Promise<TmuxResult> => {
-    if (args.includes("has-session")) {
+    if (args.includes("list-sessions")) {
       probes++;
       inFlight++;
       maxInFlight = Math.max(maxInFlight, inFlight);
       await Bun.sleep(30);
       inFlight--;
+      return ok("s\t0\t80\t24\n");
     }
     return ok();
   };
   const term = new TerminalService({ tmuxAsync });
+  await Bun.sleep(40); // let the constructor's stale-pipe sweep finish
+  probes = 0;
+  maxInFlight = 0;
   // Plant an owned session directly (ensure() would spawn a real attach PTY).
   (term as any).sessions.set("s", {
     pty: { write() {}, resize() {}, kill() {} },
@@ -929,6 +934,138 @@ test("list() reports the scanner-debounced state, not a fresh raw inference", as
   (term as any).states.set("s", new StateHysteresis("wait"));
   const sessions = await term.list();
   expect(sessions.find((s) => s.name === "s")?.state).toBe("wait");
+  term.dispose();
+});
+
+// Owned session planted without a real channel; scanner-facing fields only.
+function plant(term: TerminalService, name: string) {
+  (term as any).sessions.set(name, {
+    pty: { write() {}, resize() {}, kill() {} },
+    meta: { name, state: "run", cols: 80, rows: 24, lastLine: "", createdAt: 0, attached: true },
+    lastOutputAt: Date.now(),
+  });
+}
+const rosterLine = (name: string, extra = "@1\t0\t1700000000\t0,0") => `${name}\t1700000000\t80\t24\t${extra}\n`;
+
+test("scan: one roster query covers every owned session; a missing one is confirmed before reaping", async () => {
+  const calls: string[][] = [];
+  let roster = rosterLine("a") + rosterLine("b") + rosterLine("c");
+  const term = new TerminalService({
+    tmuxAsync: async (args) => {
+      calls.push(args);
+      if (args.includes("list-sessions")) return ok(roster);
+      if (args.includes("has-session")) return fail();
+      return ok();
+    },
+  });
+  const exits: string[] = [];
+  term.onExit((n) => exits.push(n));
+  for (const n of ["a", "b", "c"]) plant(term, n);
+  calls.length = 0; // drop the constructor's stale-pipe sweep
+  await (term as any).scanAsync();
+  expect(calls.filter((a) => a.includes("list-sessions")).length).toBe(1);
+  expect(calls.some((a) => a.includes("has-session") || a.includes("display-message"))).toBe(false);
+  roster = rosterLine("a") + rosterLine("c");
+  calls.length = 0;
+  await (term as any).scanAsync();
+  expect(calls.filter((a) => a.includes("has-session"))).toEqual([["has-session", "-t", "b"]]);
+  expect(exits).toEqual(["b"]);
+  term.dispose();
+});
+
+test("scan: a failed roster query falls back to per-session has-session", async () => {
+  const calls: string[][] = [];
+  const term = new TerminalService({
+    tmuxAsync: async (args) => {
+      calls.push(args);
+      return args.includes("list-sessions") ? fail() : ok();
+    },
+  });
+  plant(term, "a");
+  await (term as any).scanAsync();
+  expect(calls.filter((a) => a.includes("has-session"))).toEqual([["has-session", "-t", "a"]]);
+  term.dispose();
+});
+
+test("scan: the watchdog takes history_size from the roster instead of a query per session", async () => {
+  const calls: string[][] = [];
+  const term = new TerminalService({
+    tmuxAsync: async (args) => {
+      calls.push(args);
+      return args.includes("list-sessions") ? ok(rosterLine("a", "@1\t42\t1700000000\t0,0")) : ok();
+    },
+  });
+  const runDir = mkdtempSync(join(tmpdir(), "ps-scan-run-"));
+  const ch = new PaneChannel("a", { tmux: () => ok(), tmuxAsync: async () => ok(), runDir });
+  (term as any).sessions.set("a", {
+    pty: ch,
+    meta: { name: "a", state: "run", cols: 80, rows: 24, lastLine: "", createdAt: 0, attached: true },
+    lastOutputAt: Date.now() - 60_000,
+  });
+  await (term as any).scanAsync();
+  expect(calls.some((a) => a.includes("display-message"))).toBe(false);
+  expect((term as any).watchdogs.get("a")).toBeDefined();
+  ch.kill();
+  term.dispose();
+});
+
+test("scan: the roster refreshes a session's cached window id", async () => {
+  const term = new TerminalService({
+    tmuxAsync: async (args) => (args.includes("list-sessions") ? ok(rosterLine("a", "@7\t0\t1700000000\t0,0")) : ok()),
+  });
+  plant(term, "a");
+  (term as any).windowIds.set("a", "@1");
+  await (term as any).scanAsync();
+  expect((term as any).windowIds.get("a")).toBe("@7");
+  term.dispose();
+});
+
+test("arbitrate: one list-clients query, attributed by each client's session", async () => {
+  let t = 100_000;
+  const calls: string[][] = [];
+  const term = new TerminalService({
+    now: () => t,
+    tmux: (args) => (args[0] === "display-message" ? ok("@3\n") : ok()),
+    tmuxAsync: async (args) => {
+      calls.push(args);
+      return args.includes("list-clients") ? ok("200\tother\n90\twork\n") : ok();
+    },
+  });
+  for (const n of ["work", "play"]) {
+    plant(term, n);
+    term.noteUse(n, "phone", { cols: 72, rows: 35 });
+    term.resize(n, 72, 35);
+  }
+  calls.length = 0;
+  await term.arbitrateWindows();
+  expect(calls.filter((a) => a.includes("list-clients")).length).toBe(1);
+  expect(calls.some((a) => a[0] === "set-option")).toBe(false); // activity in "other" is not ours
+  term.dispose();
+});
+
+test("list(): the preview is captured again only after tmux reports a change", async () => {
+  let t = 2_000_000_000_000;
+  let roster = rosterLine("w", "@1\t5\t1999999990\t3,4");
+  let captures = 0;
+  const term = new TerminalService({
+    now: () => t,
+    tmuxAsync: async (args) => {
+      if (args.includes("list-sessions")) return ok(roster);
+      if (args.includes("capture-pane")) { captures++; return ok(`line ${captures}\n`); }
+      return ok();
+    },
+  });
+  expect((await term.list())[0].lastLine).toBe("line 1");
+  t += 3000;
+  expect((await term.list())[0].lastLine).toBe("line 1"); // unchanged, quiet since before the capture
+  roster = rosterLine("w", "@1\t5\t2000000000\t5,4");
+  expect((await term.list())[0].lastLine).toBe("line 2"); // cursor moved
+  roster = rosterLine("w", "@1\t5\t2000000003\t5,4"); // new activity
+  expect((await term.list())[0].lastLine).toBe("line 3");
+  t += 2000;
+  expect((await term.list())[0].lastLine).toBe("line 4"); // same second as capture 3, so re-checked once
+  expect((await term.list())[0].lastLine).toBe("line 4");
+  expect(captures).toBe(4);
   term.dispose();
 });
 
