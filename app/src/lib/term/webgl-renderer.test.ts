@@ -1,10 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { installWebgl, MAX_WEBGL_REBUILDS, type WebglAddonLike, type WebglHost } from "./webgl-renderer";
+import { installWebgl, MAX_WEBGL_REBUILDS, WEBGL_STABLE_MS, type WebglAddonLike, type WebglHost } from "./webgl-renderer";
 
 // Fake addon + host. Each create() hands back a fresh addon carrying its own
 // loss emitter, exactly like the real WebglAddon — the recovery code must
 // re-subscribe on every rebuild or the second loss goes unheard.
-function harness(opts: { failCreateFrom?: number; noLoseExtension?: boolean } = {}) {
+function harness(opts: { failCreateFrom?: number; noLoseExtension?: boolean; now?: () => number } = {}) {
   const addons: Array<WebglAddonLike & { lose(): void; disposed: boolean; contextLost: boolean }> = [];
   const logs: string[] = [];
   const host: WebglHost = {
@@ -35,6 +35,7 @@ function harness(opts: { failCreateFrom?: number; noLoseExtension?: boolean } = 
       return addon;
     },
     log: (m) => logs.push(m),
+    now: opts.now,
   };
   return { host, addons, logs };
 }
@@ -322,5 +323,106 @@ describe("suspend/resume for background tabs", () => {
 
     expect(h.addons).toHaveLength(1);
     expect(handle.active()).toBe(false);
+  });
+});
+
+describe("rebuild budget over time", () => {
+  const clocked = () => {
+    let t = 1_000_000;
+    const h = harness({ now: () => t });
+    return { ...h, advance: (ms: number) => { t += ms; } };
+  };
+
+  it("keeps rebuilding when each context stayed up for a while (routine background losses)", () => {
+    const h = clocked();
+    const handle = installWebgl(h.host);
+    for (let i = 0; i < 6; i++) {
+      h.advance(WEBGL_STABLE_MS);
+      h.addons[h.addons.length - 1].lose();
+    }
+    expect(handle.rebuilds()).toBe(6);
+    expect(handle.active()).toBe(true);
+  });
+
+  it("still gives up when the rebuilt contexts keep dying quickly", () => {
+    const h = clocked();
+    const handle = installWebgl(h.host);
+    for (let i = 0; i < 3; i++) {
+      h.advance(1_000);
+      h.addons[h.addons.length - 1].lose();
+    }
+    expect(handle.active()).toBe(false);
+    expect(h.addons).toHaveLength(MAX_WEBGL_REBUILDS + 1);
+  });
+
+  it("retries WebGL on a later resume once the failures are old", () => {
+    const h = clocked();
+    const handle = installWebgl(h.host);
+    for (let i = 0; i < 3; i++) h.addons[h.addons.length - 1].lose();
+    expect(handle.active()).toBe(false);
+
+    handle.suspend();
+    handle.resume();
+    expect(handle.active()).toBe(false); // too soon: same broken streak
+
+    handle.suspend();
+    h.advance(WEBGL_STABLE_MS);
+    handle.resume();
+    expect(handle.active()).toBe(true);
+    expect(h.addons).toHaveLength(4);
+  });
+
+  it("a retry after giving up gets a fresh budget", () => {
+    const h = clocked();
+    const handle = installWebgl(h.host);
+    for (let i = 0; i < 3; i++) h.addons[h.addons.length - 1].lose();
+    handle.suspend();
+    h.advance(WEBGL_STABLE_MS);
+    handle.resume();
+    h.addons[h.addons.length - 1].lose();
+    expect(handle.active()).toBe(true);
+  });
+});
+
+describe("hide (kept warm while off-screen)", () => {
+  it("keeps the context and needs no rebuild when shown again", () => {
+    const h = harness();
+    const handle = installWebgl(h.host);
+    handle.hide();
+    handle.resume();
+    expect(h.addons).toHaveLength(1);
+    expect(h.addons[0].disposed).toBe(false);
+    expect(handle.active()).toBe(true);
+  });
+
+  it("a loss while hidden parks the terminal and the next show rebuilds it", () => {
+    const h = harness();
+    const handle = installWebgl(h.host, 0);
+    handle.hide();
+    h.addons[0].lose();
+    expect(h.addons).toHaveLength(1);
+    expect(handle.active()).toBe(false);
+    handle.resume();
+    expect(h.addons).toHaveLength(2);
+    expect(handle.active()).toBe(true);
+    expect(handle.rebuilds()).toBe(0); // not a GPU failure, no budget used
+  });
+
+  it("suspend after hide still releases the context", () => {
+    const h = harness();
+    const handle = installWebgl(h.host);
+    handle.hide();
+    handle.suspend();
+    expect(h.addons[0].disposed).toBe(true);
+    expect(h.addons[0].contextLost).toBe(true);
+  });
+
+  it("a terminal without WebGL stays on the DOM renderer through hide/resume", () => {
+    const h = harness({ failCreateFrom: 0 });
+    const handle = installWebgl(h.host);
+    handle.hide();
+    handle.resume();
+    expect(handle.active()).toBe(false);
+    expect(h.addons).toHaveLength(0);
   });
 });

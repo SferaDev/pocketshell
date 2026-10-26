@@ -23,6 +23,9 @@
 // budget so a device whose GPU keeps dying settles on the DOM renderer instead
 // of thrashing in a rebuild loop.
 export const MAX_WEBGL_REBUILDS = 2;
+// A context that stayed up this long did not die to a broken GPU: the rebuild
+// budget starts over, so routine losses while backgrounded never use it up.
+export const WEBGL_STABLE_MS = 30_000;
 
 // The slice of WebglAddon this module needs. Narrow on purpose: it keeps the
 // unit tests free of any real WebGL.
@@ -66,6 +69,7 @@ export interface WebglHost {
   // Diagnostics. Real losses are rare and only observable on a phone, so the
   // console trail is the only forensic evidence we get.
   log?(message: string): void;
+  now?(): number;
 }
 
 export interface WebglHandle {
@@ -87,10 +91,13 @@ export interface WebglHandle {
   // contexts and the browser silently killed the older tabs' renderers. That is
   // why the corruption needed several tabs to appear, why some tabs stayed
   // correct while others froze mid-frame, and why closing ALL tabs was the only
-  // cure. A hidden terminal draws nothing, so holding its context buys nothing
-  // and costs the one resource that is actually scarce.
+  // cure. A hidden terminal draws nothing, so only the few streaming tabs keep
+  // theirs (hide) and every other one gives the scarce resource back.
   suspend(): void;
   resume(): void;
+  // Off-screen but kept warm: the context is held so showing the tab again
+  // costs no rebuild. A loss while hidden parks it instead of rebuilding.
+  hide(): void;
   // Detach for good: no further loss event may rebuild anything. Called on
   // unmount, where rebuilding into a torn-down terminal would be a leak.
   dispose(): void;
@@ -109,11 +116,17 @@ export function installWebgl(
 ): WebglHandle {
   let current: WebglAddonLike | undefined;
   let rebuilds = 0;
+  // Losses since the last context that stayed up for WEBGL_STABLE_MS.
+  let strikes = 0;
+  let attachedAt = 0;
+  let gaveUpAt: number | null = null;
   let released = false;
   // Deliberately off-screen, as opposed to "never had a context" or "the GPU
   // took it away". Only a suspend may be resumed.
   let suspended = false;
+  let hidden = false;
   const log = (m: string) => host.log?.(m);
+  const now = () => host.now?.() ?? Date.now();
 
   // Attach a fresh addon and subscribe to ITS loss event. Each addon has its own
   // emitter, so the handler must be re-registered on every rebuild — this is
@@ -122,6 +135,7 @@ export function installWebgl(
     try {
       const addon = host.create();
       current = addon;
+      attachedAt = now();
       addon.onContextLoss(() => {
         // Ignore a loss reported by an addon we already replaced or released:
         // the dead addon's emitter can still fire, and acting on it would burn
@@ -147,14 +161,25 @@ export function installWebgl(
     // how one dead context ends up corrupting the others.
     try { dead?.dispose(); } catch (e) { log(`[webgl] dispose after loss threw: ${String(e)}`); }
 
-    if (rebuilds >= maxRebuilds) {
-      // Budget spent: this device's GPU context is not staying up. Stop
-      // rebuilding and let the DOM renderer (slower, but it cannot lose a
-      // context) carry the session.
-      log(`[webgl] context lost ${rebuilds + 1}x, giving up on WebGL — DOM renderer from here`);
+    if (hidden) {
+      hidden = false;
+      suspended = true;
+      log("[webgl] context lost while hidden, rebuilding on next show");
       return;
     }
 
+    const t = now();
+    if (t - attachedAt >= WEBGL_STABLE_MS) strikes = 0;
+    if (strikes >= maxRebuilds) {
+      // Budget spent: this device's GPU context is not staying up. Stop
+      // rebuilding and let the DOM renderer (slower, but it cannot lose a
+      // context) carry the session.
+      gaveUpAt = t;
+      log(`[webgl] context lost ${strikes + 1}x in a row, giving up on WebGL — DOM renderer for now`);
+      return;
+    }
+
+    strikes++;
     rebuilds++;
     if (attach()) log(`[webgl] context lost, rebuilt renderer (attempt ${rebuilds})`);
     else log(`[webgl] context lost and rebuild failed — DOM renderer from here`);
@@ -178,6 +203,9 @@ export function installWebgl(
     active: () => current !== undefined,
     rebuilds: () => rebuilds,
     suspend() {
+      hidden = false;
+      // A terminal that gave up may retry WebGL on a later resume.
+      if (!released && !current && gaveUpAt !== null) suspended = true;
       // Released → already torn down. No addon → the DOM renderer is drawing,
       // which holds no GL context and so has nothing to give back.
       if (released || !current) return;
@@ -197,7 +225,13 @@ export function installWebgl(
       // Only a suspend may be undone. Without this guard a resume racing an
       // unmount — or arriving for a terminal that never had WebGL at all —
       // would create a context nothing owns.
+      hidden = false;
       if (released || !suspended || current) return;
+      if (gaveUpAt !== null) {
+        if (now() - gaveUpAt < WEBGL_STABLE_MS) return;
+        gaveUpAt = null;
+        strikes = 0;
+      }
       suspended = false;
       // Deliberately NO reseed, unlike the context-loss path. The buffer lives
       // in xterm's core, not in the renderer, so it survives an addon swap
@@ -206,6 +240,10 @@ export function installWebgl(
       // charge, and hidden terminals stash their output separately (R1).
       // Reseeding here would mean a tmux round-trip on every single tab switch.
       if (!attach()) log("[webgl] resume failed to create a context — DOM renderer for this tab");
+    },
+    hide() {
+      if (released) return;
+      hidden = current !== undefined;
     },
     dispose() {
       released = true;

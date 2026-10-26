@@ -1729,8 +1729,8 @@
   // 强制杀最老的。每个 tab 一个活上下文时，开几个窗口就会让老 tab 的渲染器被
   // 悄悄杀掉，表现为部分 tab 花屏/冻结，且只有关掉全部 tab 才恢复。
   //
-  // 隐藏的终端不渲染，占着上下文毫无收益，所以切走即释放、切回再重建，存活数
-  // 恒为 1，永远碰不到上限。
+  // 隐藏的终端不渲染，所以切走即释放、切回再重建。例外是仍在 streaming 的隐藏
+  // tab：保留上下文（hide），切回不必重建。存活数以 streaming 的 tab 数为上限。
   //
   // closed 的终端是墓碑，不再渲染，也就不必占着上下文。
   //
@@ -1739,8 +1739,10 @@
   // 就没 suspend），不会把刚建好的上下文拆掉重建。
   $effect(() => {
     const visible = active && !closed;
+    const warm = streaming && !closed;
     if (!mounted || !webglHandle) return;
     if (visible) webglHandle.resume();
+    else if (warm) webglHandle.hide();
     else webglHandle.suspend();
   });
 
