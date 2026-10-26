@@ -374,17 +374,17 @@ export const RPC_TABLE: Record<string, RpcHandler> = {
     return ok({ ok: true, ...d });
   },
 
-  "term.paneInfo": (ctx, p) => {
+  "term.paneInfo": async (ctx, p) => {
     const sid = parse.session(p).session;
-    return ok(ctx.shell.has(sid) ? { currentCommand: "", alternateOn: false, isShell: true, mouseOn: false, mouseSgr: false } : ctx.terminal.paneInfo(sid));
+    return ok(ctx.shell.has(sid) ? { currentCommand: "", alternateOn: false, isShell: true, mouseOn: false, mouseSgr: false } : await ctx.terminal.paneInfo(sid));
   },
-  "term.redraw": (ctx, p) => {
+  "term.redraw": async (ctx, p) => {
     const sid = parse.session(p).session;
-    return ok(ctx.shell.has(sid) ? { ok: true } : ctx.terminal.redraw(sid));
+    return ok(ctx.shell.has(sid) ? { ok: true } : await ctx.terminal.redraw(sid));
   },
-  "terminal.pwd": (ctx, p) => {
+  "terminal.pwd": async (ctx, p) => {
     const sid = parse.session(p).session;
-    return ok(ctx.shell.has(sid) ? { pwd: "" } : ctx.terminal.pwd(sid));
+    return ok(ctx.shell.has(sid) ? { pwd: "" } : await ctx.terminal.pwd(sid));
   },
 
   // base is chosen by the client (project-root bookmark or the file's dir). An
@@ -535,8 +535,8 @@ export function lookupRpc(method: string): RpcHandler | undefined {
  *
  * Deliberately NOT `async`: a synchronous handler must reach sendResult in the
  * caller's own tick (the old switch did, and both the wire tests and the
- * in-process __test hooks read the reply right after message()). Only the two
- * genuinely async handlers (term.history / term.capture) return a promise.
+ * in-process __test hooks read the reply right after message()). Handlers that
+ * query tmux (term.history, term.capture, term.paneInfo, ...) return a promise.
  */
 export function dispatchRpc(ctx: RpcContext, method: string, params: unknown): void | Promise<void> {
   try {

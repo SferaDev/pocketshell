@@ -448,17 +448,17 @@ test("history() 仍是带颜色的全量 capture（委托 capture 后行为不�
   term.dispose();
 });
 
-test("paneInfo() reports current command and alternate-screen state", () => {
+test("paneInfo() reports current command and alternate-screen state", async () => {
   const term = new TerminalService({
     tmux: (args) => (args[0] === "display-message" ? ok("vim|1") : ok()),
   });
-  expect(term.paneInfo("vim")).toEqual({
+  expect(await term.paneInfo("vim")).toEqual({
     currentCommand: "vim", alternateOn: true, isShell: false, mouseOn: false, mouseSgr: false,
   });
   term.dispose();
 });
 
-test("paneInfo() reports mouse reporting flags from tmux", () => {
+test("paneInfo() reports mouse reporting flags from tmux", async () => {
   const calls: string[][] = [];
   const term = new TerminalService({
     tmux: (args) => {
@@ -466,7 +466,7 @@ test("paneInfo() reports mouse reporting flags from tmux", () => {
       return args[0] === "display-message" ? ok("claude|1|1|1") : ok();
     },
   });
-  expect(term.paneInfo("cc")).toEqual({
+  expect(await term.paneInfo("cc")).toEqual({
     currentCommand: "claude", alternateOn: true, isShell: false, mouseOn: true, mouseSgr: true,
   });
   const call = calls.find((a) => a[0] === "display-message" && a.includes("cc"))!;
@@ -475,37 +475,37 @@ test("paneInfo() reports mouse reporting flags from tmux", () => {
   term.dispose();
 });
 
-test("paneInfo() keeps mouse flags off when tmux echoes only mouse_sgr", () => {
+test("paneInfo() keeps mouse flags off when tmux echoes only mouse_sgr", async () => {
   const term = new TerminalService({
     tmux: (args) => (args[0] === "display-message" ? ok("vim|1|0|1") : ok()),
   });
-  const info = term.paneInfo("vim");
+  const info = await term.paneInfo("vim");
   expect(info.mouseOn).toBe(false);
   expect(info.mouseSgr).toBe(true);
   term.dispose();
 });
 
-test("paneInfo() recognizes common shells", () => {
+test("paneInfo() recognizes common shells", async () => {
   const term = new TerminalService({
     tmux: (args) => (args[0] === "display-message" ? ok("zsh|1") : ok()),
   });
-  expect(term.paneInfo("shell")).toEqual({
+  expect(await term.paneInfo("shell")).toEqual({
     currentCommand: "zsh", alternateOn: true, isShell: true, mouseOn: false, mouseSgr: false,
   });
   term.dispose();
 });
 
-test("paneInfo() returns a complete shape (incl. isShell) when tmux fails", () => {
+test("paneInfo() returns a complete shape (incl. isShell) when tmux fails", async () => {
   // A failing display-message must NOT drop isShell: the frontend reads it as a
   // boolean and an undefined would falsy-misclassify a shell as a full-screen app.
   const term = new TerminalService({ tmux: () => fail() });
-  expect(term.paneInfo("gone")).toEqual({
+  expect(await term.paneInfo("gone")).toEqual({
     currentCommand: "", alternateOn: false, isShell: false, mouseOn: false, mouseSgr: false,
   });
   term.dispose();
 });
 
-test("redraw() 抖动窗口尺寸让程序自己重绘（不再依赖 attach 客户端）", () => {
+test("redraw() 抖动窗口尺寸让程序自己重绘（不再依赖 attach 客户端）", async () => {
   // 【2026-08-25 契约变更】原来是给每个 attach 客户端发 refresh-client。换掉
   // attach 之后我们不再是 tmux 的客户端，list-clients 恒为空，那条路只会返回
   // false。新契约：cols-1 再 cols，让 tmux 给窗格发 SIGWINCH，程序自己重绘 ——
@@ -514,7 +514,7 @@ test("redraw() 抖动窗口尺寸让程序自己重绘（不再依赖 attach 客
   const term = new TerminalService({ tmux: (args) => { calls.push(args); return ok(); } });
   term.ensure("work", { cols: 80, rows: 24 });
   calls.length = 0;
-  expect(term.redraw("work")).toEqual({ ok: true });
+  expect(await term.redraw("work")).toEqual({ ok: true });
   const resizes = calls.filter((a) => a[0] === "resize-window");
   expect(resizes.length).toBe(2);
   expect(resizes[0]).toEqual(["resize-window", "-t", "work", "-x", "79", "-y", "24"]);
@@ -716,35 +716,35 @@ test.skipIf(!hasTmux)("arbitrate: a phone-only session with no real clients stay
   }
 }, 15000);
 
-test("redraw() 对未持有的会话返回 false（没有尺寸可抖）", () => {
+test("redraw() 对未持有的会话返回 false（没有尺寸可抖）", async () => {
   const term = new TerminalService({ tmux: () => ok() });
-  expect(term.redraw("never-ensured")).toEqual({ ok: false });
+  expect(await term.redraw("never-ensured")).toEqual({ ok: false });
   term.dispose();
 });
 
-test("redraw() degrades gracefully when tmux fails or no client is attached", () => {
+test("redraw() degrades gracefully when tmux fails or no client is attached", async () => {
   const dead = new TerminalService({ tmux: () => fail() });
-  expect(dead.redraw("gone")).toEqual({ ok: false });
+  expect(await dead.redraw("gone")).toEqual({ ok: false });
   dead.dispose();
 
   const lonely = new TerminalService({
     tmux: (args) => (args.includes("list-clients") ? ok("\n") : ok()),
   });
-  expect(lonely.redraw("detached")).toEqual({ ok: false });
+  expect(await lonely.redraw("detached")).toEqual({ ok: false });
   lonely.dispose();
 });
 
-test("pwd() returns the pane_current_path from tmux", () => {
+test("pwd() returns the pane_current_path from tmux", async () => {
   const term = new TerminalService({
     tmux: (args) => (args.includes("display-message") ? ok("/Users/me/proj\n") : ok()),
   });
-  expect(term.pwd("s1")).toEqual({ pwd: "/Users/me/proj" });
+  expect(await term.pwd("s1")).toEqual({ pwd: "/Users/me/proj" });
   term.dispose();
 });
 
-test("pwd() returns empty pwd when tmux fails", () => {
+test("pwd() returns empty pwd when tmux fails", async () => {
   const term = new TerminalService({ tmux: () => fail() });
-  expect(term.pwd("s1")).toEqual({ pwd: "" });
+  expect(await term.pwd("s1")).toEqual({ pwd: "" });
   term.dispose();
 });
 

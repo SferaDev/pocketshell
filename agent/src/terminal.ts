@@ -122,9 +122,8 @@ export class TerminalService {
   private states = new Map<string, StateHysteresis>();
   private scanTimer: ReturnType<typeof setInterval>;
   private tmux: TmuxRunner;
-  // Async runner for the hot probe paths (scanner + list). The sync runner
-  // stays for one-shot, user-initiated RPC/control calls (history, paneInfo,
-  // ensure, rename, ...).
+  // Async runner for the hot probe paths (scanner, list, RPC queries). The sync
+  // runner stays for one-shot control calls (ensure, rename, kill, ...).
   private tmuxAsync: AsyncTmuxRunner;
   private pinned = new Map<string, Set<string>>();
   // Last real phone use per session, and each device's last known size, for last-device-wins sizing.
@@ -293,7 +292,7 @@ export class TerminalService {
     //    「detach」这回事，会话不在了就只有一个结局 —— 收尸。
     for (const { name, alive } of probes) {
       if (alive || !this.sessions.has(name)) continue;
-      if (this.hasSession(name)) continue; // 假死，放过
+      if (await this.hasSessionAsync(name)) continue; // 假死，放过
       this.reap(name, 0);
     }
     await this.watchdogTick(now);
@@ -610,14 +609,14 @@ export class TerminalService {
   // Snapshot of the tmux pane's current state. Used by the frontend to decide
   // whether an alternate-screen buffer is a shell (stay in normal scrollback,
   // seed history) or a full-screen app (3x virtual rows + outer scrolling).
-  paneInfo(name: string): {
+  async paneInfo(name: string): Promise<{
     currentCommand: string;
     alternateOn: boolean;
     isShell: boolean;
     mouseOn: boolean;
     mouseSgr: boolean;
-  } {
-    const res = this.tmux([
+  }> {
+    const res = await this.tmuxAsync([
       "display-message", "-p", "-t", name,
       "#{pane_current_command}|#{alternate_on}|#{mouse_any_flag}|#{mouse_sgr_flag}",
     ]);
@@ -656,13 +655,13 @@ export class TerminalService {
   // 相隔 0/50/200ms 结果一致（SIGWINCH 合并不构成问题）。**但对不处理 SIGWINCH 的
   // 程序（shell 提示符、cat 出来的静态文本）它什么也不做** —— 那种情况下前端应当
   // 走 capture-pane 重新播种，而不是指望这里。所以 ok 只表示「抖动发出去了」。
-  redraw(name: string): { ok: boolean } {
+  async redraw(name: string): Promise<{ ok: boolean }> {
     const live = this.sessions.get(name);
     if (!live) return { ok: false };
     const { cols, rows } = live.meta;
     if (cols <= 1) return { ok: false };
-    const a = this.tmux(["resize-window", "-t", name, "-x", String(cols - 1), "-y", String(rows)]);
-    const b = this.tmux(["resize-window", "-t", name, "-x", String(cols), "-y", String(rows)]);
+    const a = await this.tmuxAsync(["resize-window", "-t", name, "-x", String(cols - 1), "-y", String(rows)]);
+    const b = await this.tmuxAsync(["resize-window", "-t", name, "-x", String(cols), "-y", String(rows)]);
     this.markPinned(name);
     return { ok: a.exitCode === 0 && b.exitCode === 0 };
   }
@@ -670,8 +669,8 @@ export class TerminalService {
   // The focused pane's real working directory (tmux #{pane_current_path}).
   // Used by the file panel's "set project root to focused tab" button. `-u`
   // forces UTF-8 so CJK path segments aren't sanitized under a C locale.
-  pwd(name: string): { pwd: string } {
-    const res = this.tmux(["-u", "display-message", "-p", "-t", name, "#{pane_current_path}"]);
+  async pwd(name: string): Promise<{ pwd: string }> {
+    const res = await this.tmuxAsync(["-u", "display-message", "-p", "-t", name, "#{pane_current_path}"]);
     if (res.exitCode !== 0) return { pwd: "" };
     return { pwd: new TextDecoder().decode(res.stdout).trim() };
   }
