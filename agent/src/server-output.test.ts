@@ -74,15 +74,18 @@ test("A2: bursts within the window become ONE output frame (one seq, concatenate
   const ws = fakeWs();
   openReady(srv, ws);
   attach(srv, ws, "s");
-  srv.__test.emitOutput("s", b("ab"));
+  srv.__test.emitOutput("s", b("ab")); // leading edge: goes out at once
   srv.__test.emitOutput("s", b("cd"));
-  expect(ws.sent.length).toBe(0); // nothing before the window closes
+  srv.__test.emitOutput("s", b("ef"));
+  expect(outputs(ws).length).toBe(1); // the rest waits for the window
   srv.__test.flushOutput("s");
   const out = outputs(ws);
-  expect(out.length).toBe(1);
-  if (out[0].type === "output") {
+  expect(out.length).toBe(2);
+  if (out[0].type === "output" && out[1].type === "output") {
     expect(out[0].seq).toBe(1);
-    expect(Buffer.from(fromB64(out[0].data)).toString()).toBe("abcd");
+    expect(Buffer.from(fromB64(out[0].data)).toString()).toBe("ab");
+    expect(out[1].seq).toBe(2);
+    expect(Buffer.from(fromB64(out[1].data)).toString()).toBe("cdef");
   }
   srv.stop();
 });

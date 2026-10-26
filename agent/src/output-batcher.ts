@@ -2,8 +2,10 @@
 // full-screen redraw can be dozens of events), and each used to become its own
 // numbered frame + JSON encode + encrypt + WS frame per connection. Accumulate
 // per session and flush either when the batch reaches `flushBytes` or when the
-// window opened by the batch's first byte expires. The 8ms default caps added
-// latency for keystroke echo, which travels this same path. The flushed byte
+// window opened by the batch's first byte expires. A chunk arriving when nothing
+// was flushed for that session in the last `flushMs` goes out at once (leading
+// edge), so a lone keystroke echo pays no window at all; the rest of a burst
+// still coalesces behind it. The flushed byte
 // string is ingested as ONE replay frame (one seq), so seq semantics and the
 // wire protocol are unchanged. Timer functions are injectable for tests.
 
@@ -12,6 +14,7 @@ export interface OutputBatcherOpts {
   flushMs?: number; // window opened by a batch's first byte, default 8
   setTimeout?: (fn: () => void, ms: number) => unknown;
   clearTimeout?: (handle: unknown) => void;
+  now?: () => number;
 }
 
 interface Pending {
@@ -32,10 +35,12 @@ function concat(parts: Uint8Array[], total: number): Uint8Array {
 
 export class OutputBatcher {
   private pending = new Map<string, Pending>();
+  private lastFlushAt = new Map<string, number>();
   private flushBytes: number;
   private flushMs: number;
   private setTimeoutFn: (fn: () => void, ms: number) => unknown;
   private clearTimeoutFn: (handle: unknown) => void;
+  private now: () => number;
 
   constructor(
     private onFlush: (sessionId: string, data: Uint8Array) => void,
@@ -45,10 +50,20 @@ export class OutputBatcher {
     this.flushMs = opts.flushMs ?? 8;
     this.setTimeoutFn = opts.setTimeout ?? ((fn, ms) => setTimeout(fn, ms));
     this.clearTimeoutFn = opts.clearTimeout ?? ((h) => clearTimeout(h as never));
+    this.now = opts.now ?? (() => performance.now());
   }
 
   push(sessionId: string, chunk: Uint8Array): void {
     let p = this.pending.get(sessionId);
+    if (!p || p.bytes === 0) {
+      const last = this.lastFlushAt.get(sessionId);
+      const now = this.now();
+      if (last === undefined || now - last >= this.flushMs) {
+        this.lastFlushAt.set(sessionId, now);
+        this.onFlush(sessionId, chunk);
+        return;
+      }
+    }
     if (!p) {
       p = { parts: [], bytes: 0, timer: null };
       this.pending.set(sessionId, p);
@@ -71,6 +86,7 @@ export class OutputBatcher {
     if (!p || p.bytes === 0) return;
     if (p.timer !== null) this.clearTimeoutFn(p.timer);
     this.pending.delete(sessionId);
+    this.lastFlushAt.set(sessionId, this.now());
     this.onFlush(sessionId, p.parts.length === 1 ? p.parts[0] : concat(p.parts, p.bytes));
   }
 
@@ -79,9 +95,11 @@ export class OutputBatcher {
     const p = this.pending.get(sessionId);
     if (p && p.timer !== null) this.clearTimeoutFn(p.timer);
     this.pending.delete(sessionId);
+    this.lastFlushAt.delete(sessionId);
   }
 
   clearAll(): void {
     for (const id of [...this.pending.keys()]) this.clear(id);
+    this.lastFlushAt.clear();
   }
 }

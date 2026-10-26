@@ -8,7 +8,10 @@ const b = (s: string) => enc.encode(s);
 function fakeClock() {
   const timers = new Map<number, () => void>();
   let next = 1;
+  let t = 0;
   return {
+    now: () => t,
+    advance: (ms: number) => { t += ms; },
     setTimeout: (fn: () => void, _ms: number) => { const id = next++; timers.set(id, fn); return id; },
     clearTimeout: (h: unknown) => { timers.delete(h as number); },
     fireAll: () => { const fns = [...timers.values()]; timers.clear(); for (const f of fns) f(); },
@@ -24,12 +27,71 @@ function harness(opts: { flushBytes?: number; flushMs?: number } = {}) {
     flushMs: opts.flushMs ?? 8,
     setTimeout: clock.setTimeout,
     clearTimeout: clock.clearTimeout,
+    now: clock.now,
   });
-  return { clock, flushed, batcher };
+  // Spend each session's leading-edge flush so later pushes land inside a window.
+  const prime = (...ids: string[]) => {
+    for (const id of ids) batcher.push(id, b("!"));
+    flushed.length = 0;
+  };
+  return { clock, flushed, batcher, prime };
 }
 
-test("small bursts within the window flush as ONE concatenated batch on expiry", () => {
+test("a lone chunk after a quiet window is flushed immediately (leading edge)", () => {
   const { clock, flushed, batcher } = harness();
+  batcher.push("s", b("a"));
+  expect(flushed.map((f) => Buffer.from(f.data).toString())).toEqual(["a"]);
+  expect(clock.pending()).toBe(0);
+  clock.advance(8);
+  batcher.push("s", b("b"));
+  expect(flushed.length).toBe(2);
+  expect(clock.pending()).toBe(0);
+});
+
+test("a burst right after a leading flush coalesces into one windowed batch", () => {
+  const { clock, flushed, batcher } = harness();
+  batcher.push("s", b("a"));
+  clock.advance(1);
+  batcher.push("s", b("b"));
+  batcher.push("s", b("c"));
+  expect(flushed.length).toBe(1);
+  expect(clock.pending()).toBe(1);
+  clock.advance(8);
+  clock.fireAll();
+  expect(flushed.map((f) => Buffer.from(f.data).toString())).toEqual(["a", "bc"]);
+});
+
+test("a windowed flush counts as recent: the next chunk inside flushMs waits", () => {
+  const { clock, flushed, batcher, prime } = harness();
+  prime("s");
+  batcher.push("s", b("x"));
+  clock.advance(8);
+  clock.fireAll();
+  clock.advance(3);
+  batcher.push("s", b("y"));
+  expect(flushed.map((f) => Buffer.from(f.data).toString())).toEqual(["x"]);
+  expect(clock.pending()).toBe(1);
+});
+
+test("the leading edge is tracked per session", () => {
+  const { flushed, batcher, prime } = harness();
+  prime("a");
+  batcher.push("a", b("A"));
+  batcher.push("b", b("B"));
+  expect(flushed.map((f) => f.sessionId)).toEqual(["b"]);
+});
+
+test("clear() forgets the last flush, so a reused session id starts on the leading edge", () => {
+  const { flushed, batcher, prime } = harness();
+  prime("s");
+  batcher.clear("s");
+  batcher.push("s", b("z"));
+  expect(flushed.length).toBe(1);
+});
+
+test("small bursts within the window flush as ONE concatenated batch on expiry", () => {
+  const { clock, flushed, batcher, prime } = harness();
+  prime("s");
   batcher.push("s", b("ab"));
   batcher.push("s", b("cd"));
   batcher.push("s", b("e"));
@@ -41,7 +103,8 @@ test("small bursts within the window flush as ONE concatenated batch on expiry",
 });
 
 test("the window is opened by the first byte only — later pushes do not extend it", () => {
-  const { clock, flushed, batcher } = harness();
+  const { clock, flushed, batcher, prime } = harness();
+  prime("s");
   batcher.push("s", b("a"));
   batcher.push("s", b("b"));
   batcher.push("s", b("c"));
@@ -51,7 +114,8 @@ test("the window is opened by the first byte only — later pushes do not extend
 });
 
 test("reaching flushBytes flushes immediately, without waiting for the window", () => {
-  const { clock, flushed, batcher } = harness({ flushBytes: 8 });
+  const { clock, flushed, batcher, prime } = harness({ flushBytes: 8 });
+  prime("s");
   batcher.push("s", b("12345"));
   expect(flushed.length).toBe(0);
   batcher.push("s", b("678")); // 5+3 = 8 >= flushBytes
@@ -70,7 +134,8 @@ test("a single chunk at/above flushBytes flushes on its own", () => {
 });
 
 test("batches are isolated per session", () => {
-  const { clock, flushed, batcher } = harness();
+  const { clock, flushed, batcher, prime } = harness();
+  prime("a", "b");
   batcher.push("a", b("A1"));
   batcher.push("b", b("B1"));
   batcher.push("a", b("A2"));
@@ -84,7 +149,8 @@ test("batches are isolated per session", () => {
 });
 
 test("clear() drops buffered bytes and cancels the window (session destroyed)", () => {
-  const { clock, flushed, batcher } = harness();
+  const { clock, flushed, batcher, prime } = harness();
+  prime("s");
   batcher.push("s", b("tail"));
   batcher.clear("s");
   expect(clock.pending()).toBe(0);
@@ -99,7 +165,8 @@ test("flush() on an empty session is a no-op", () => {
 });
 
 test("clearAll() cancels every pending window", () => {
-  const { clock, flushed, batcher } = harness();
+  const { clock, flushed, batcher, prime } = harness();
+  prime("a", "b");
   batcher.push("a", b("x"));
   batcher.push("b", b("y"));
   batcher.clearAll();
@@ -109,7 +176,8 @@ test("clearAll() cancels every pending window", () => {
 });
 
 test("a single-chunk batch is passed through without copying", () => {
-  const { flushed, batcher } = harness();
+  const { flushed, batcher, prime } = harness();
+  prime("s");
   const chunk = b("solo");
   batcher.push("s", chunk);
   batcher.flush("s");
