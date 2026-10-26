@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { cacheStrategy, bucketName, staleBuckets, BUCKET_PREFIX } from "./sw-cache";
+import { cacheStrategy, bucketName, staleBuckets, shellAssets, BUCKET_PREFIX } from "./sw-cache";
 
 describe("cacheStrategy", () => {
   it("hashed assets are cache-first", () => {
@@ -15,9 +15,9 @@ describe("cacheStrategy", () => {
     expect(cacheStrategy("/manifest.webmanifest")).toBe("cache-first");
   });
 
-  it("the shell is network-first", () => {
-    expect(cacheStrategy("/")).toBe("network-first");
-    expect(cacheStrategy("/index.html")).toBe("network-first");
+  it("the shell is served from cache and refreshed in the background", () => {
+    expect(cacheStrategy("/")).toBe("shell");
+    expect(cacheStrategy("/index.html")).toBe("shell");
   });
 
   it("preview routes never touch the cache (token auth expires)", () => {
@@ -57,5 +57,14 @@ describe("staleBuckets", () => {
 
   it("returns empty when only the current bucket exists", () => {
     expect(staleBuckets(["ps-v1.0.1"], "1.0.1")).toEqual([]);
+  });
+});
+
+describe("shellAssets", () => {
+  it("lists each hashed bundle the shell loads, once", () => {
+    const html = `<script type="module" src="/assets/index-DBNL.js"></script>
+      <link rel="modulepreload" href="/assets/vendor-a1_b.js"><link rel="stylesheet" href="/assets/index-x9.css">
+      <script src="/assets/index-DBNL.js"></script><link rel="icon" href="/icons/icon.svg">`;
+    expect(shellAssets(html)).toEqual(["/assets/index-DBNL.js", "/assets/vendor-a1_b.js", "/assets/index-x9.css"]);
   });
 });

@@ -9,7 +9,7 @@
 //
 // Strategy, by path:
 //   /assets/*, /fonts/*, /icons/*, /manifest.webmanifest -> cache-first
-//   /, /index.html                                       -> network-first
+//   /, /index.html                                       -> shell (cache, refreshed in background)
 //   everything else (incl. /preview/*, /sw.js)         -> bypass
 // Allowlist by design: an unlisted path is never cached, so a future
 // token-authed route can't be cached by accident.
@@ -25,18 +25,34 @@ const BUCKET = BUCKET_PREFIX + VERSION;
 
 const CACHE_FIRST_PREFIXES = ["/assets/", "/fonts/", "/icons/"];
 const CACHE_FIRST_EXACT = ["/manifest.webmanifest"];
-const NETWORK_FIRST_EXACT = ["/", "/index.html"];
+const SHELL_EXACT = ["/", "/index.html"];
+const SHELL_KEY = "/";
+const SHELL_ASSET_RE = /\/assets\/[A-Za-z0-9._-]+/g;
 
 function cacheStrategy(pathname) {
-  if (NETWORK_FIRST_EXACT.indexOf(pathname) !== -1) return "network-first";
+  if (SHELL_EXACT.indexOf(pathname) !== -1) return "shell";
   if (CACHE_FIRST_EXACT.indexOf(pathname) !== -1) return "cache-first";
   for (const p of CACHE_FIRST_PREFIXES) if (pathname.startsWith(p)) return "cache-first";
   return "bypass";
 }
 
-// Nothing is precached: the bucket fills lazily as the app requests things.
-// That keeps install cheap and avoids shipping a build manifest into this file.
-self.addEventListener("install", () => self.skipWaiting());
+// The shell and the bundles it loads are precached so this version's bucket can
+// boot the app with no network. A failed precache fails the install, which
+// keeps the previous worker and its bucket instead of activating an empty one.
+// Everything else fills lazily as the app requests it.
+self.addEventListener("install", (e) => {
+  self.skipWaiting();
+  e.waitUntil(precacheShell());
+});
+
+async function precacheShell() {
+  const res = await fetch(SHELL_KEY, { cache: "no-store" });
+  if (!res.ok) throw new Error("shell precache failed: " + res.status);
+  const html = await res.clone().text();
+  const cache = await caches.open(BUCKET);
+  await cache.addAll([...new Set(html.match(SHELL_ASSET_RE) || [])]);
+  await cache.put(SHELL_KEY, res);
+}
 
 self.addEventListener("activate", (e) =>
   e.waitUntil(
@@ -65,20 +81,17 @@ async function cacheFirst(req) {
   return res;
 }
 
-async function networkFirst(req) {
+// One cache entry serves "/", "/index.html" and "/?session=…" alike.
+async function shell(e) {
   const cache = await caches.open(BUCKET);
-  try {
-    const res = await fetch(req);
-    if (res && res.status === 200 && res.type === "basic") cache.put(req, res.clone());
+  const refresh = fetch(e.request).then((res) => {
+    if (res && res.status === 200 && res.type === "basic") return cache.put(SHELL_KEY, res.clone()).then(() => res);
     return res;
-  } catch (err) {
-    // Agent unreachable: fall back to the last good shell rather than a
-    // browser error page. Offline is still not supported (the terminal needs
-    // the WebSocket) — this only avoids a blank screen.
-    const hit = await cache.match(req);
-    if (hit) return hit;
-    throw err;
-  }
+  });
+  const hit = await cache.match(SHELL_KEY);
+  if (!hit) return refresh;
+  e.waitUntil(refresh.catch(() => {}));
+  return hit;
 }
 
 self.addEventListener("fetch", (e) => {
@@ -88,7 +101,7 @@ self.addEventListener("fetch", (e) => {
   if (url.origin !== self.location.origin) return; // third-party: never our business
   const strategy = cacheStrategy(url.pathname);
   if (strategy === "cache-first") e.respondWith(cacheFirst(req));
-  else if (strategy === "network-first") e.respondWith(networkFirst(req));
+  else if (strategy === "shell") e.respondWith(shell(e));
   // bypass: don't call respondWith at all — the browser does its normal thing
 });
 

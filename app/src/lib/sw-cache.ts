@@ -6,7 +6,7 @@
 // so it carries a hand-mirrored copy of these rules. Change one, change both.
 // Same arrangement as index.html's inline theme guard <-> lib/theme.ts.
 
-export type CacheStrategy = "cache-first" | "network-first" | "bypass";
+export type CacheStrategy = "cache-first" | "shell" | "bypass";
 
 /** Cache bucket name prefix. Every bucket we own starts with this. */
 export const BUCKET_PREFIX = "ps-v";
@@ -21,8 +21,10 @@ export function bucketName(version: string): string {
 const CACHE_FIRST_PREFIXES = ["/assets/", "/fonts/", "/icons/"];
 // Cache-first exact paths.
 const CACHE_FIRST_EXACT = new Set(["/manifest.webmanifest"]);
-// The shell: always try the network so the app never boots a stale entry point.
-const NETWORK_FIRST_EXACT = new Set(["/", "/index.html"]);
+// The shell: served from cache at once and refreshed in the background, so a
+// slow or dead link never holds the app on the splash screen. A stale shell is
+// caught after connecting, when the agent's version differs from the app's.
+const SHELL_EXACT = new Set(["/", "/index.html"]);
 
 /**
  * Decide how a same-origin GET should be handled. Allowlist by design: anything
@@ -30,7 +32,7 @@ const NETWORK_FIRST_EXACT = new Set(["/", "/index.html"]);
  * endpoint, say) can't be cached by accident.
  */
 export function cacheStrategy(pathname: string): CacheStrategy {
-  if (NETWORK_FIRST_EXACT.has(pathname)) return "network-first";
+  if (SHELL_EXACT.has(pathname)) return "shell";
   if (CACHE_FIRST_EXACT.has(pathname)) return "cache-first";
   for (const p of CACHE_FIRST_PREFIXES) if (pathname.startsWith(p)) return "cache-first";
   return "bypass";
@@ -40,4 +42,11 @@ export function cacheStrategy(pathname: string): CacheStrategy {
 export function staleBuckets(keys: string[], currentVersion: string): string[] {
   const keep = bucketName(currentVersion);
   return keys.filter((k) => k.startsWith(BUCKET_PREFIX) && k !== keep);
+}
+
+// Hashed bundles the shell loads at boot; a new worker caches them with the shell.
+const SHELL_ASSET_RE = /\/assets\/[A-Za-z0-9._-]+/g;
+
+export function shellAssets(html: string): string[] {
+  return [...new Set(html.match(SHELL_ASSET_RE) ?? [])];
 }

@@ -25,7 +25,7 @@
   import KeyboardTutorial from "./components/KeyboardTutorial.svelte";
   import { shouldShowTutorial, markTutorialSeen, tutorialFor, type TutorialId } from "./lib/term/kb-tutorial";
   import type { CheckResult } from "./lib/update";
-  import { shouldReloadAfterUpdate } from "./lib/update";
+  import { shouldReloadAfterUpdate, shouldReloadForVersion } from "./lib/update";
   import { hardReset } from "./lib/cache-admin";
   import { brandPrefix } from "./lib/ui/instance-name";
   import { inputTarget } from "./lib/ui/input-target";
@@ -254,8 +254,17 @@
   // brandPrefix 返回空串 —— 顶栏与加此特性前完全一致。
   let instanceName = $state<string | null>(null);
   async function loadAgentInfo() {
-    try { instanceName = (await conn.agentInfo()).instanceName; }
-    catch { /* 断线时保持现状，不清空已显示的名字 */ }
+    let info: Awaited<ReturnType<typeof conn.agentInfo>>;
+    try { info = await conn.agentInfo(); }
+    catch { return; /* 断线时保持现状，不清空已显示的名字 */ }
+    instanceName = info.instanceName;
+    const RELOADED_FOR = "pocketshell.reloadedFor";
+    let reloadedFor: string | null = null;
+    try { reloadedFor = sessionStorage.getItem(RELOADED_FOR); } catch { /* storage blocked */ }
+    if (shouldReloadForVersion(__APP_VERSION__, info.version, reloadedFor)) {
+      try { sessionStorage.setItem(RELOADED_FOR, info.version!); } catch { /* storage blocked */ }
+      void hardReset();
+    }
   }
   const terms = new Map<string, Terminal>();
   // 每个终端暴露的重灌入口（onResync 用）。与 terms 同生命周期。

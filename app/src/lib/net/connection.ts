@@ -1054,7 +1054,7 @@ export class Connection {
     this.notificationCbs.push(cb);
     return () => { this.notificationCbs = this.notificationCbs.filter((c) => c !== cb); };
   }
-  agentInfo(): Promise<{ instanceName: string | null }> { return this.rpc("agent.info") as Promise<{ instanceName: string | null }>; }
+  agentInfo(): Promise<{ instanceName: string | null; version?: string }> { return this.rpc("agent.info") as Promise<{ instanceName: string | null; version?: string }>; }
   notifyGetConfig(): Promise<unknown> { return this.rpc("notify.getConfig"); }
   notifySetConfig(config: unknown): Promise<unknown> { return this.rpc("notify.setConfig", { config }); }
   notifyGetVapidKey(): Promise<{ publicKey: string }> { return this.rpc("notify.getVapidPublicKey") as Promise<{ publicKey: string }>; }

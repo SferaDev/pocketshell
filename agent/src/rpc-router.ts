@@ -397,7 +397,7 @@ export const RPC_TABLE: Record<string, RpcHandler> = {
 
   // 实例身份：只读，走通用 RPC 信封（不需要新增 protocol 消息类型）。
   // 天然只在 Noise 握手成功后可得 —— 未配对设备看不到实例名。
-  "agent.info": (ctx) => ok({ instanceName: ctx.config.instanceName ?? null }),
+  "agent.info": (ctx) => ok({ instanceName: ctx.config.instanceName ?? null, version: AGENT_VERSION }),
 
   // 自定义主题的写操作。**读**走 HTTP（`GET /theme/custom.css`，必须是
   // <link> 能拉的普通样式表，见 server-theme.ts），写走这里——理由是鉴权：

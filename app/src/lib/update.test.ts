@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { phaseLabelKey, hasUpdate, compareSemver, shouldReloadAfterUpdate } from "./update";
+import { phaseLabelKey, hasUpdate, compareSemver, shouldReloadAfterUpdate, shouldReloadForVersion } from "./update";
 
 describe("update pure logic", () => {
   it("phaseLabelKey maps each phase", () => {
@@ -29,5 +29,21 @@ describe("shouldReloadAfterUpdate", () => {
 
   it("does not reload when the agent version is unknown", () => {
     expect(shouldReloadAfterUpdate("1.0.1", "", "restarting")).toBe(false);
+  });
+});
+
+describe("shouldReloadForVersion", () => {
+  it("reloads a page whose build differs from the agent's", () => {
+    expect(shouldReloadForVersion("1.0.0-aaa", "1.0.0-bbb", null)).toBe(true);
+  });
+  it("leaves a matching page alone", () => {
+    expect(shouldReloadForVersion("1.0.0-aaa", "1.0.0-aaa", null)).toBe(false);
+  });
+  it("leaves the page alone when the agent does not report a version", () => {
+    expect(shouldReloadForVersion("1.0.0-aaa", undefined, null)).toBe(false);
+  });
+  it("reloads only once per agent version, so a persistent mismatch cannot loop", () => {
+    expect(shouldReloadForVersion("1.0.0-aaa", "1.0.0-bbb", "1.0.0-bbb")).toBe(false);
+    expect(shouldReloadForVersion("1.0.0-aaa", "1.0.0-ccc", "1.0.0-bbb")).toBe(true);
   });
 });

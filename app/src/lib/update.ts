@@ -51,3 +51,18 @@ export function shouldReloadAfterUpdate(
   if (!agentVersion) return false;
   return agentVersion !== appVersion;
 }
+
+/**
+ * On connect: is this page an older (or newer) build than the agent serves?
+ * The service worker boots the cached shell first, so after an agent update the
+ * first launch runs the previous build. Reload once per agent version so a
+ * mismatch that survives the reload cannot loop.
+ */
+export function shouldReloadForVersion(
+  appVersion: string,
+  agentVersion: string | undefined,
+  reloadedFor: string | null,
+): boolean {
+  if (!agentVersion || agentVersion === appVersion) return false;
+  return reloadedFor !== agentVersion;
+}

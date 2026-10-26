@@ -1,4 +1,5 @@
 import { test, expect } from "bun:test";
+import { AGENT_VERSION } from "./version";
 import { startServer, applyGate } from "./server";
 import type { SecureChannel } from "./secure-channel";
 import { encode, decodeServer } from "./protocol";
@@ -824,7 +825,7 @@ test("agent.info returns the instance name when set", () => {
   expect(reply.type).toBe("response");
   if (reply.type === "response" && reply.ok) {
     expect(reply.id).toBe("i1");
-    expect(reply.result).toEqual({ instanceName: "开发" });
+    expect(reply.result).toEqual({ instanceName: "开发", version: AGENT_VERSION });
   } else { throw new Error("expected an ok response"); }
 });
 
@@ -832,7 +833,7 @@ test("agent.info returns null when no instance name is set", () => {
   const reply = rpcInfoReply();
   expect(reply.type).toBe("response");
   if (reply.type === "response" && reply.ok) {
-    expect(reply.result).toEqual({ instanceName: null });
+    expect(reply.result).toEqual({ instanceName: null, version: AGENT_VERSION });
   } else { throw new Error("expected an ok response"); }
 });
 

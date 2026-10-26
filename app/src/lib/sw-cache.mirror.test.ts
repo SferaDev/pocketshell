@@ -6,7 +6,7 @@
 // 改 ts，测试覆盖的是一套、跑的是另一套——两种都不会有任何报错。
 //
 // 这里读 public/sw.js 的文本，把三张表和桶名前缀抽出来与 ts 侧比。ts 侧的私有常量
-// （CACHE_FIRST_* / NETWORK_FIRST_*）不导出，故同样从源文件文本抽取——比对的是
+// （CACHE_FIRST_* / SHELL_EXACT）不导出，故同样从源文件文本抽取——比对的是
 // 「两份声明」而不是「运行时值 vs 声明」，这正是镜像要防的东西。
 import { test, expect } from "vitest";
 import { readFileSync } from "node:fs";
@@ -32,7 +32,7 @@ function bucketPrefix(src: string): string {
   return m[1];
 }
 
-const TABLES = ["CACHE_FIRST_PREFIXES", "CACHE_FIRST_EXACT", "NETWORK_FIRST_EXACT"] as const;
+const TABLES = ["CACHE_FIRST_PREFIXES", "CACHE_FIRST_EXACT", "SHELL_EXACT"] as const;
 
 test("桶名前缀两侧一致", () => {
   // 前缀漂移的后果最隐蔽：activate 里靠前缀清理旧桶，前缀一变，老桶永远删不掉，
@@ -54,7 +54,7 @@ for (const name of TABLES) {
   });
 }
 
-test("三张表没有交集（同一路径不能既 cache-first 又 network-first）", () => {
+test("三张表没有交集（同一路径不能既 cache-first 又 shell）", () => {
   const all = TABLES.flatMap((n) => pathList(TS, n));
   expect([...new Set(all.filter((p, i) => all.indexOf(p) !== i))]).toEqual([]);
 });
@@ -62,10 +62,10 @@ test("三张表没有交集（同一路径不能既 cache-first 又 network-firs
 test("cacheStrategy 的分支顺序两侧一致", () => {
   // 判定顺序决定了重叠时谁赢。抽出三条 return 的先后，两侧必须同序。
   const order = (src: string) =>
-    [...src.matchAll(/return\s+"(cache-first|network-first|bypass)"/g)].map((m) => m[1]);
+    [...src.matchAll(/return\s+"(cache-first|shell|bypass)"/g)].map((m) => m[1]);
   const tsOrder = order(TS.slice(TS.indexOf("export function cacheStrategy")));
   const jsOrder = order(JS.slice(JS.indexOf("function cacheStrategy"), JS.indexOf("self.addEventListener")));
-  expect(tsOrder).toEqual(["network-first", "cache-first", "cache-first", "bypass"]);
+  expect(tsOrder).toEqual(["shell", "cache-first", "cache-first", "bypass"]);
   expect(jsOrder, "public/sw.js 的 cacheStrategy 分支顺序与 sw-cache.ts 漂移了").toEqual(tsOrder);
 });
 
@@ -79,15 +79,21 @@ test("sw.js 里没有 ts 侧未声明的路径表项（反向漏网）", () => {
 test("从 sw.js 的表反推的策略与 ts 的 cacheStrategy 判定一致", () => {
   // 端到端一遍：拿 js 侧声明的路径，去问 ts 侧的真·实现，答案必须对得上。
   for (const p of pathList(JS, "CACHE_FIRST_EXACT")) expect(cacheStrategy(p)).toBe("cache-first");
-  for (const p of pathList(JS, "NETWORK_FIRST_EXACT")) expect(cacheStrategy(p)).toBe("network-first");
+  for (const p of pathList(JS, "SHELL_EXACT")) expect(cacheStrategy(p)).toBe("shell");
   for (const p of pathList(JS, "CACHE_FIRST_PREFIXES")) expect(cacheStrategy(`${p}x.bin`)).toBe("cache-first");
+});
+
+test("SHELL_ASSET_RE is the same pattern on both sides", () => {
+  const re = (src: string) => /SHELL_ASSET_RE\s*=\s*(\/.*\/g);/.exec(src)?.[1];
+  expect(re(JS), "public/sw.js 的 SHELL_ASSET_RE 与 sw-cache.ts 漂移了").toBe(re(TS));
+  expect(re(TS)).toBeDefined();
 });
 
 test("解析器自身有效性自检", () => {
   // 断言几乎全是「两边相等」，正则一旦失配返回空数组就会假阳性全绿。锚一下已知内容。
   expect(pathList(TS, "CACHE_FIRST_PREFIXES")).toEqual(["/assets/", "/fonts/", "/icons/"]);
   expect(pathList(TS, "CACHE_FIRST_EXACT")).toEqual(["/manifest.webmanifest"]);
-  expect(pathList(TS, "NETWORK_FIRST_EXACT")).toEqual(["/", "/index.html"]);
+  expect(pathList(TS, "SHELL_EXACT")).toEqual(["/", "/index.html"]);
   expect(bucketPrefix(TS)).toBe("ps-v");
 });
 
