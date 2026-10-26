@@ -124,6 +124,7 @@ export class TerminalService {
   // stays for one-shot, user-initiated RPC/control calls (history, paneInfo,
   // ensure, rename, ...).
   private tmuxAsync: AsyncTmuxRunner;
+  private pinned = new Map<string, Set<string>>();
   private scanning = false;
   private disposed = false;
   // 【2026-08-27 通道看门狗】B2 通道某一环瞬时阻塞（cat 不退出、tmux 不报错、
@@ -613,6 +614,7 @@ export class TerminalService {
     if (cols <= 1) return { ok: false };
     const a = this.tmux(["resize-window", "-t", name, "-x", String(cols - 1), "-y", String(rows)]);
     const b = this.tmux(["resize-window", "-t", name, "-x", String(cols), "-y", String(rows)]);
+    this.markPinned(name);
     return { ok: a.exitCode === 0 && b.exitCode === 0 };
   }
 
@@ -641,7 +643,25 @@ export class TerminalService {
     });
     ch.onExit((code) => this.onPtyExit(name, code));
     ch.resize(cols, rows);
+    this.markPinned(name);
     return ch;
+  }
+
+  // resize-window leaves window-size=manual on the window; remember which windows we pinned.
+  private markPinned(name: string): void {
+    const res = this.tmux(["display-message", "-p", "-t", name, "#{window_id}"]);
+    const id = res.exitCode === 0 ? new TextDecoder().decode(res.stdout).trim() : "";
+    const targets = this.pinned.get(name) ?? new Set<string>();
+    targets.add(id || name);
+    this.pinned.set(name, targets);
+  }
+
+  // Hand the windows we pinned back to tmux's own sizing. Idempotent; a gone session is fine.
+  releaseWindow(name: string): void {
+    const targets = this.pinned.get(name);
+    if (!targets) return;
+    this.pinned.delete(name);
+    for (const t of targets) this.tmux(["set-option", "-uw", "-t", t, "window-size"]);
   }
 
   // tmux session is the source of truth: a dead PTY may just be a detach.
@@ -678,6 +698,7 @@ export class TerminalService {
     live?.pty.kill();
     this.sessions.delete(name);
     this.states.delete(name);
+    this.pinned.delete(name);
     for (const cb of this.exitCbs) cb(name, code);
     this.emitSessionsChange();
   }
@@ -798,6 +819,7 @@ export class TerminalService {
     live.meta.rows = rows;
     live.pty.resize(cols, rows);
     this.tmux(["resize-window", "-t", name, "-x", String(cols), "-y", String(rows)]);
+    this.markPinned(name);
   }
 
   async kill(name: string): Promise<void> {
@@ -805,6 +827,7 @@ export class TerminalService {
     live?.pty.kill();
     this.sessions.delete(name);
     this.states.delete(name);
+    this.pinned.delete(name);
     this.tmux(["kill-session", "-t", name]);
     this.emitSessionsChange();
   }
@@ -831,6 +854,9 @@ export class TerminalService {
     live.meta.name = newName;
     this.sessions.delete(name);
     this.sessions.set(newName, live);
+    const pinnedTargets = this.pinned.get(name);
+    this.pinned.delete(name);
+    if (pinnedTargets) this.pinned.set(newName, pinnedTargets);
     const m = this.states.get(name);
     this.states.delete(name);
     if (m) this.states.set(newName, m);

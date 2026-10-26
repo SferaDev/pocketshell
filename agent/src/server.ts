@@ -212,6 +212,11 @@ export function startServer(deps: Deps = {}) {
     needsResyncSessions: Set<string>;
   }
   const conns = new Map<ServerWebSocket<unknown>, Conn>();
+  // Give the tmux window back to real clients once no device subscribes to the session.
+  const releaseIfUnviewed = (name: string): void => {
+    for (const c of conns.values()) if (c.subscriptions.has(name)) return;
+    terminal.releaseWindow(name);
+  };
   // Token-scoped HTTP preview access, minted over the authed WS (below) and
   // consumed by the /preview route. Tokens are bound to the device pubkey and
   // reclaimed when that device has no live connections left.
@@ -792,6 +797,7 @@ export function startServer(deps: Deps = {}) {
       case "detach":
         conn.subscriptions.delete(msg.sessionId);
         conn.needsResyncSessions.delete(msg.sessionId);
+        releaseIfUnviewed(msg.sessionId);
         break;
       case "pair":
         // Reaching handleClient means this conn is already authorized (its device
@@ -1029,6 +1035,18 @@ export function startServer(deps: Deps = {}) {
   };
 
   const tlsMaterial = resolveTlsMaterial(config.keyDir, config.tls);
+  const onClose = (ws: ServerWebSocket<unknown>): void => {
+    const conn = conns.get(ws);
+    conns.delete(ws);
+    if (conn) { clearTimeout(conn.handshakeTimer); clearTimeout(conn.pairTimer); }
+    if (conn) for (const id of conn.subscriptions) releaseIfUnviewed(id);
+    // Reclaim this device's preview tokens once it has no live socket left.
+    if (conn?.remoteStatic && ![...conns.values()].some((c) => c.remoteStatic === conn.remoteStatic)) {
+      previewTokens.revokeDevice(conn.remoteStatic);
+      notifyPresence.delete(conn.remoteStatic);
+    }
+    console.log("[pocketshell] disconnect");
+  };
   const server = Bun.serve({
     hostname: config.listen.host,
     port: deps.port ?? config.listen.port,
@@ -1152,17 +1170,7 @@ export function startServer(deps: Deps = {}) {
     websocket: {
       maxPayloadLength: WS_MAX_PAYLOAD_BYTES,
       open(ws) { onOpen(ws, (ws as any).remoteAddress ?? ""); },
-      close(ws) {
-        const conn = conns.get(ws);
-        conns.delete(ws);
-        if (conn) { clearTimeout(conn.handshakeTimer); clearTimeout(conn.pairTimer); }
-        // Reclaim this device's preview tokens once it has no live socket left.
-        if (conn?.remoteStatic && ![...conns.values()].some((c) => c.remoteStatic === conn.remoteStatic)) {
-          previewTokens.revokeDevice(conn.remoteStatic);
-          notifyPresence.delete(conn.remoteStatic);
-        }
-        console.log("[pocketshell] disconnect");
-      },
+      close(ws) { onClose(ws); },
       message(ws, raw) { onMessage(ws, raw as any); },
       // Socket drained after backpressure: recover any dropped-output sessions.
       drain(ws) { const conn = conns.get(ws); if (conn) maybeResync(conn); },
@@ -1205,6 +1213,7 @@ export function startServer(deps: Deps = {}) {
       open: (ws: any, ip = "") => onOpen(ws, ip),
       openWith: (ws: any, ip: string, factory: () => SecureChannel) => onOpen(ws, ip, factory),
       message: onMessage,
+      close: onClose,
       broadcastOutputForTest: () => { for (const conn of conns.values()) sendSecure(conn, { type: "pong" }); },
       periodicPush,
       emitOutput: onTermOutput,

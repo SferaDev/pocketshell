@@ -491,6 +491,73 @@ test("redraw() 抖动窗口尺寸让程序自己重绘（不再依赖 attach 客
   term.dispose();
 });
 
+test("resize() pins the window; releaseWindow() unsets window-size once and is idempotent", () => {
+  const calls: string[][] = [];
+  const term = new TerminalService({
+    tmux: (args) => { calls.push(args); return args[0] === "display-message" ? ok("@3\n") : ok(); },
+  });
+  term.ensure("work", { cols: 80, rows: 24 });
+  term.resize("work", 72, 35);
+  calls.length = 0;
+  term.releaseWindow("work");
+  expect(calls).toEqual([["set-option", "-uw", "-t", "@3", "window-size"]]);
+  calls.length = 0;
+  term.releaseWindow("work");
+  expect(calls).toEqual([]);
+  term.dispose();
+});
+
+test("releaseWindow() does nothing for a session the agent never resized", () => {
+  const calls: string[][] = [];
+  const term = new TerminalService({ tmux: (args) => { calls.push(args); return ok(); } });
+  term.releaseWindow("foreign");
+  expect(calls.some((a) => a[0] === "set-option")).toBe(false);
+  term.dispose();
+});
+
+test("releaseWindow() unsets every window the agent pinned and tolerates a gone session", () => {
+  let id = "@1";
+  const calls: string[][] = [];
+  const term = new TerminalService({
+    tmux: (args) => {
+      calls.push(args);
+      if (args[0] === "display-message") return ok(`${id}\n`);
+      if (args[0] === "set-option") return fail();
+      return ok();
+    },
+  });
+  term.ensure("work", { cols: 80, rows: 24 });
+  id = "@2";
+  term.resize("work", 72, 35);
+  calls.length = 0;
+  expect(() => term.releaseWindow("work")).not.toThrow();
+  expect(calls).toEqual([
+    ["set-option", "-uw", "-t", "@1", "window-size"],
+    ["set-option", "-uw", "-t", "@2", "window-size"],
+  ]);
+  term.dispose();
+});
+
+test.skipIf(!hasTmux)("releaseWindow() returns window-size to unset on a real tmux server", async () => {
+  const svc = new TerminalService();
+  const NAME = uniqueSessionName("pin");
+  const winSize = () =>
+    new TextDecoder().decode(
+      Bun.spawnSync(["tmux", "show-options", "-wv", "-t", NAME, "window-size"]).stdout,
+    ).trim();
+  try {
+    svc.ensure(NAME, { cols: 80, rows: 24 });
+    svc.resize(NAME, 72, 35);
+    expect(winSize()).toBe("manual");
+    svc.releaseWindow(NAME);
+    expect(winSize()).toBe("");
+  } finally {
+    await svc.kill(NAME);
+    svc.dispose();
+    killSession(NAME);
+  }
+}, 15000);
+
 test("redraw() 对未持有的会话返回 false（没有尺寸可抖）", () => {
   const term = new TerminalService({ tmux: () => ok() });
   expect(term.redraw("never-ensured")).toEqual({ ok: false });

@@ -1131,3 +1131,50 @@ test("oversize pre-auth frame closes the socket before the channel sees it", () 
   expect(received).toBe(0);
   srv.stop();
 });
+
+test("window pin: released only when the last subscribed device detaches or disconnects", () => {
+  const calls: string[][] = [];
+  const okr = (s = "") => ({ exitCode: 0, stdout: utf8(s), stderr: new Uint8Array() });
+  const terminal = new TerminalService({
+    tmux: (args) => { calls.push(args); return args[0] === "display-message" ? okr("@7\n") : okr(); },
+  });
+  const srv = startServer({ port: 0, channelFactory: passthroughResponder, terminal });
+  const open = () => {
+    const ws = fakeWs();
+    srv.__test.open(ws as any);
+    srv.__test.message(ws as any, M1);
+    return ws;
+  };
+  const send = (ws: any, msg: object) => srv.__test.message(ws, utf8(encode(msg as any)));
+  const releases = () => calls.filter((a) => a[0] === "set-option").length;
+  const a = open();
+  const b = open();
+  terminal.ensure("work", { cols: 80, rows: 24 });
+  for (const ws of [a, b]) send(ws, { type: "attach", sessionId: "work" });
+  send(a, { type: "resize", sessionId: "work", cols: 72, rows: 35 });
+  calls.length = 0;
+
+  send(a, { type: "detach", sessionId: "work" });
+  expect(releases()).toBe(0);
+  srv.__test.close(b as any);
+  expect(calls).toContainEqual(["set-option", "-uw", "-t", "@7", "window-size"]);
+  srv.stop();
+});
+
+test("window pin: socket close of the only viewer releases the window", () => {
+  const calls: string[][] = [];
+  const okr = (s = "") => ({ exitCode: 0, stdout: utf8(s), stderr: new Uint8Array() });
+  const terminal = new TerminalService({
+    tmux: (args) => { calls.push(args); return args[0] === "display-message" ? okr("@7\n") : okr(); },
+  });
+  const srv = startServer({ port: 0, channelFactory: passthroughResponder, terminal });
+  const ws = fakeWs();
+  srv.__test.open(ws as any);
+  srv.__test.message(ws as any, M1);
+  terminal.ensure("work", { cols: 80, rows: 24 });
+  srv.__test.message(ws as any, utf8(encode({ type: "attach", sessionId: "work" })));
+  calls.length = 0;
+  srv.__test.close(ws as any);
+  expect(calls).toContainEqual(["set-option", "-uw", "-t", "@7", "window-size"]);
+  srv.stop();
+});
