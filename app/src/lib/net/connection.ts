@@ -111,6 +111,13 @@ export function rpcDeadlineMs(queuedBytes: number): number {
   return Math.min(RPC_MAX_TIMEOUT_MS, RPC_BASE_TIMEOUT_MS + drainMs);
 }
 
+// Wake check: a socket idle this long when the page comes back gets a ping
+// probe, and is dropped if nothing at all arrives within WAKE_PROBE_MS.
+export const WAKE_IDLE_MS = 3_000;
+export const WAKE_PROBE_MS = 1_500;
+// A drop this soon after a wake reconnects with no backoff delay.
+const WAKE_FAST_RECONNECT_MS = 5_000;
+
 // 12 期 rpc 压缩埋点：只上报明显大的 rpc，小 rpc 高频且不关心，全报会刷屏日志。
 const RPC_DIAG_SAMPLE_MIN_BYTES = 8192;
 
@@ -165,6 +172,12 @@ export class Connection {
   private livenessMs: number;
   private hbTimer?: number;
   private lastRx = 0;
+  private probeTimer?: number;
+  private wokeAt = Number.NEGATIVE_INFINITY;
+  private onWake = (): void => {
+    if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+    this.checkAlive();
+  };
 
   // ---- 链路指标（分割条）----
   private metricsCbs: MetricsCb[] = [];
@@ -285,8 +298,14 @@ export class Connection {
   }
 
   dispose(): void {
+    if (typeof document !== "undefined") document.removeEventListener("visibilitychange", this.onWake);
+    if (typeof window !== "undefined") {
+      window.removeEventListener("pageshow", this.onWake);
+      window.removeEventListener("online", this.onWake);
+    }
     this.stopHeartbeat();
     this.clearHsTimer();
+    this.clearProbe();
     if (this.reconnectTimer !== undefined) this.sched.clearTimeout(this.reconnectTimer);
     this.rejectAllPending();
     this.ws.close();
@@ -425,15 +444,55 @@ export class Connection {
     this.getPairing = opts.getPairing ?? (() => getPendingPair());
     this.onPaired = opts.onPaired;
     this.connect();
-    if (typeof document !== "undefined") {
-      document.addEventListener("visibilitychange", () => {
-        if (document.visibilityState === "visible" && this._status === "offline") {
-          if (this.reconnectTimer !== undefined) { this.sched.clearTimeout(this.reconnectTimer); this.reconnectTimer = undefined; }
-          this.backoffAttempt = 0;
-          this.connect();
-        }
-      });
+    // Android freezes a backgrounded page and its socket can come back half
+    // dead, so every return to the foreground re-checks the link.
+    if (typeof document !== "undefined") document.addEventListener("visibilitychange", this.onWake);
+    if (typeof window !== "undefined") {
+      window.addEventListener("pageshow", this.onWake);
+      window.addEventListener("online", this.onWake);
     }
+  }
+
+  /**
+   * The page is visible again (or back online): reconnect now if offline, and
+   * otherwise probe a socket that has been silent for a while instead of
+   * waiting out the heartbeat liveness window.
+   */
+  checkAlive(): void {
+    this.wokeAt = this.sched.now();
+    if (this._status === "offline") {
+      if (this.reconnectTimer !== undefined) { this.sched.clearTimeout(this.reconnectTimer); this.reconnectTimer = undefined; }
+      this.backoffAttempt = 0;
+      this.connect();
+      return;
+    }
+    if (!this.open || this.channel.state !== "transport" || this.probeTimer !== undefined) return;
+    const sentAt = this.sched.now();
+    if (sentAt - this.lastRx <= WAKE_IDLE_MS) return;
+    this.pingSentAt = sentAt;
+    this.pingsOutstanding++;
+    this.send({ type: "ping" });
+    const socket = this.ws;
+    this.probeTimer = this.sched.setTimeout(() => {
+      this.probeTimer = undefined;
+      if (socket !== this.ws || this.lastRx >= sentAt) return;
+      this.abandonSocket();
+    }, WAKE_PROBE_MS);
+  }
+
+  private clearProbe(): void {
+    if (this.probeTimer !== undefined) { this.sched.clearTimeout(this.probeTimer); this.probeTimer = undefined; }
+  }
+
+  // A half-dead socket's close() may not fire onclose until the TCP stack
+  // gives up, so detach it and take the down path right away.
+  private abandonSocket(): void {
+    const socket = this.ws;
+    socket.onopen = null;
+    socket.onmessage = null;
+    socket.onclose = null;
+    try { socket.close(); } catch { /* already gone */ }
+    this.handleDown();
   }
 
   private connect(): void {
@@ -520,6 +579,7 @@ export class Connection {
 
   private handleDown(): void {
     this.clearHsTimer();
+    this.clearProbe();
     this.stopHeartbeat();
     this.rejectAllPending();
     this.open = false;
@@ -546,7 +606,8 @@ export class Connection {
     // A9: ±20% jitter on the exponential backoff so a fleet of devices that
     // lost the connection together (agent restart, network flap) does not
     // reconnect in lock-step and spike the server.
-    const delay = Math.round(Math.min(10_000, 500 * 2 ** this.backoffAttempt) * (0.8 + 0.4 * this.rand()));
+    const justWoke = this.backoffAttempt === 0 && this.sched.now() - this.wokeAt < WAKE_FAST_RECONNECT_MS;
+    const delay = justWoke ? 0 : Math.round(Math.min(10_000, 500 * 2 ** this.backoffAttempt) * (0.8 + 0.4 * this.rand()));
     this.backoffAttempt++;
     this.reconnectTimer = this.sched.setTimeout(() => this.connect(), delay);
   }
