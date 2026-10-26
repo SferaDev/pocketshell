@@ -376,7 +376,7 @@ export const RPC_TABLE: Record<string, RpcHandler> = {
 
   "term.paneInfo": (ctx, p) => {
     const sid = parse.session(p).session;
-    return ok(ctx.shell.has(sid) ? { currentCommand: "", alternateOn: false, isShell: true } : ctx.terminal.paneInfo(sid));
+    return ok(ctx.shell.has(sid) ? { currentCommand: "", alternateOn: false, isShell: true, mouseOn: false, mouseSgr: false } : ctx.terminal.paneInfo(sid));
   },
   "term.redraw": (ctx, p) => {
     const sid = parse.session(p).session;

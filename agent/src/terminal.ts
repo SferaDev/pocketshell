@@ -574,16 +574,29 @@ export class TerminalService {
   // Snapshot of the tmux pane's current state. Used by the frontend to decide
   // whether an alternate-screen buffer is a shell (stay in normal scrollback,
   // seed history) or a full-screen app (3x virtual rows + outer scrolling).
-  paneInfo(name: string): { currentCommand: string; alternateOn: boolean; isShell: boolean } {
-    const res = this.tmux(["display-message", "-p", "-t", name, "#{pane_current_command}|#{alternate_on}"]);
-    if (res.exitCode !== 0) return { currentCommand: "", alternateOn: false, isShell: false };
-    const [cmd = "", alt = ""] = new TextDecoder().decode(res.stdout).trim().split("|");
+  paneInfo(name: string): {
+    currentCommand: string;
+    alternateOn: boolean;
+    isShell: boolean;
+    mouseOn: boolean;
+    mouseSgr: boolean;
+  } {
+    const res = this.tmux([
+      "display-message", "-p", "-t", name,
+      "#{pane_current_command}|#{alternate_on}|#{mouse_any_flag}|#{mouse_sgr_flag}",
+    ]);
+    if (res.exitCode !== 0) {
+      return { currentCommand: "", alternateOn: false, isShell: false, mouseOn: false, mouseSgr: false };
+    }
+    const [cmd = "", alt = "", mouse = "", sgr = ""] = new TextDecoder().decode(res.stdout).trim().split("|");
     const command = cmd.trim();
     const shellNames = new Set(["zsh", "bash", "fish", "sh", "csh", "ksh", "tcsh", "dash"]);
     return {
       currentCommand: command,
       alternateOn: alt.trim() === "1",
       isShell: shellNames.has(command),
+      mouseOn: mouse.trim() === "1",
+      mouseSgr: sgr.trim() === "1",
     };
   }
 

@@ -77,6 +77,9 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { Terminal } from "@xterm/xterm";
+  import {
+    dragToWheelSteps, isVerticalDrag, newWheelState, pointToCell, sgrWheelSequence, x10WheelSequence,
+  } from "../lib/term/alt-scroll";
   import { FitAddon } from "@xterm/addon-fit";
   import { WebglAddon } from "@xterm/addon-webgl";
   import { installWebgl, type WebglHandle } from "../lib/term/webgl-renderer";
@@ -676,6 +679,40 @@
     // reliably worked around, so it's done by the copy-mode overlay
     // (TermCopyOverlay) which selects a listener-free clone of the rows instead.
     host.addEventListener("mousedown", (e) => { e.stopPropagation(); }, true);
+
+    // Touch scroll for mouse-reporting apps: xterm never learns the app's mouse mode
+    // (tmux eats the DECSET), so a vertical drag becomes wheel reports sent through
+    // the normal input path, in either buffer, as tmux does for a real wheel.
+    let touchY = 0;
+    let touchX = 0;
+    let wheelLocked = false;
+    let wheelState = newWheelState();
+    host.addEventListener("touchstart", (e) => {
+      wheelLocked = false;
+      wheelState = newWheelState();
+      if (e.touches.length !== 1) return;
+      touchX = e.touches[0]!.clientX;
+      touchY = e.touches[0]!.clientY;
+    }, { passive: true, capture: true });
+    host.addEventListener("touchmove", (e) => {
+      if (e.touches.length !== 1 || !paneMouse.on) return;
+      const t = e.touches[0]!;
+      if (!wheelLocked) {
+        if (!isVerticalDrag(t.clientX - touchX, t.clientY - touchY)) return;
+        wheelLocked = true;
+        touchY = t.clientY;
+      }
+      if (e.cancelable) e.preventDefault();
+      const screen = host.querySelector(".xterm-screen") as HTMLElement | null;
+      const rect = screen?.getBoundingClientRect();
+      if (!rect || !rect.height || !rect.width) return;
+      const steps = dragToWheelSteps(wheelState, t.clientY - touchY, rect.height / term.rows);
+      touchY = t.clientY;
+      if (!steps) return;
+      const { col, row } = pointToCell({ ...rect, cols: term.cols, rows: term.rows }, t.clientX, t.clientY);
+      const seq = paneMouse.sgr ? sgrWheelSequence(steps, col, row) : x10WheelSequence(steps, col, row);
+      conn.sendInput(sessionId, new TextEncoder().encode(seq));
+    }, { passive: false, capture: true });
     // 这里**不**调 fit.fit()（2026-08-09）。它内部直接 term.resize(proposeDimensions())，
     // 绕过下面 refit() 的 isMeasurable / isPlausible 两道门 —— 而新建 tab 是**隐藏挂载**
     // 的（display:none），此刻量出来正是 9~12 列的塌陷值。塌陷的列数会被 conn.resize
@@ -689,6 +726,8 @@
 
     // Buffer the pane is in; gates history seeding (only in the normal buffer).
     let currentBuffer: BufferType = "normal";
+    // The pane app's mouse reporting, refreshed with every paneInfo poll.
+    let paneMouse = { on: false, sgr: false };
 
     const dims = () => fit.proposeDimensions() ?? { cols: term.cols, rows: term.rows };
 
@@ -1430,9 +1469,12 @@
           currentCommand: string;
           alternateOn: boolean;
           isShell: boolean;
+          mouseOn?: boolean;
+          mouseSgr?: boolean;
         };
         if (seq !== paneInfoSeq) return; // stale response superseded by a newer poll
         if (typeof info.alternateOn !== "boolean") return; // malformed → keep current mode
+        paneMouse = { on: info.mouseOn === true, sgr: info.mouseSgr === true };
         const mode: PaneMode = info.alternateOn ? "alt" : "normal";
         // 判定要带上 xterm 的**真实**缓冲区，不能只比 appliedMode。
         //

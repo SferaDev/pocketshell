@@ -452,7 +452,36 @@ test("paneInfo() reports current command and alternate-screen state", () => {
   const term = new TerminalService({
     tmux: (args) => (args[0] === "display-message" ? ok("vim|1") : ok()),
   });
-  expect(term.paneInfo("vim")).toEqual({ currentCommand: "vim", alternateOn: true, isShell: false });
+  expect(term.paneInfo("vim")).toEqual({
+    currentCommand: "vim", alternateOn: true, isShell: false, mouseOn: false, mouseSgr: false,
+  });
+  term.dispose();
+});
+
+test("paneInfo() reports mouse reporting flags from tmux", () => {
+  const calls: string[][] = [];
+  const term = new TerminalService({
+    tmux: (args) => {
+      calls.push(args);
+      return args[0] === "display-message" ? ok("claude|1|1|1") : ok();
+    },
+  });
+  expect(term.paneInfo("cc")).toEqual({
+    currentCommand: "claude", alternateOn: true, isShell: false, mouseOn: true, mouseSgr: true,
+  });
+  const call = calls.find((a) => a[0] === "display-message" && a.includes("cc"))!;
+  expect(call).toBeDefined();
+  expect(call[4]).toContain("#{mouse_any_flag}|#{mouse_sgr_flag}");
+  term.dispose();
+});
+
+test("paneInfo() keeps mouse flags off when tmux echoes only mouse_sgr", () => {
+  const term = new TerminalService({
+    tmux: (args) => (args[0] === "display-message" ? ok("vim|1|0|1") : ok()),
+  });
+  const info = term.paneInfo("vim");
+  expect(info.mouseOn).toBe(false);
+  expect(info.mouseSgr).toBe(true);
   term.dispose();
 });
 
@@ -460,7 +489,9 @@ test("paneInfo() recognizes common shells", () => {
   const term = new TerminalService({
     tmux: (args) => (args[0] === "display-message" ? ok("zsh|1") : ok()),
   });
-  expect(term.paneInfo("shell")).toEqual({ currentCommand: "zsh", alternateOn: true, isShell: true });
+  expect(term.paneInfo("shell")).toEqual({
+    currentCommand: "zsh", alternateOn: true, isShell: true, mouseOn: false, mouseSgr: false,
+  });
   term.dispose();
 });
 
@@ -468,7 +499,9 @@ test("paneInfo() returns a complete shape (incl. isShell) when tmux fails", () =
   // A failing display-message must NOT drop isShell: the frontend reads it as a
   // boolean and an undefined would falsy-misclassify a shell as a full-screen app.
   const term = new TerminalService({ tmux: () => fail() });
-  expect(term.paneInfo("gone")).toEqual({ currentCommand: "", alternateOn: false, isShell: false });
+  expect(term.paneInfo("gone")).toEqual({
+    currentCommand: "", alternateOn: false, isShell: false, mouseOn: false, mouseSgr: false,
+  });
   term.dispose();
 });
 
