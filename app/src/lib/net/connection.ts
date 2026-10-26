@@ -138,6 +138,12 @@ export class Connection {
   private gapCbs: GapCb[] = [];
   private attached = new Set<string>();
   private seen = new Map<string, number>();
+  // Resume attaches not yet confirmed by output or refused by resumeMiss.
+  private resumes = new Map<string, number>();
+  private nextResumeId = 1;
+  private resumeMissCbs: ((sessionId: string, seed?: Promise<unknown>) => void)[] = [];
+  // term.history replies the agent sends right after a resumeMiss, keyed by session.
+  private resumeSeeds = new Map<string, { resumeId: number; result: Promise<unknown> }>();
   private pairing = false;
   private devicesCbs: ((d: DeviceInfo[]) => void)[] = [];
   private snippetsCbs: ((s: Snippet[]) => void)[] = [];
@@ -327,6 +333,12 @@ export class Connection {
     // （上传方向的 rpcBin 一直计整帧，是对的——这是一处上下行不对称）。
     // 窗口提到 16 之后尤其致命：16 lane 各等一个 56KB 响应体。
     const bytes = raw.length + Math.max(0, opts?.expectBytes ?? 0); // UTF-8 ≈ length here; payloads are base64/ASCII
+    const result = this.track(id, method, bytes);
+    this.send(msg);
+    return result;
+  }
+
+  private track(id: string, method: string, bytes: number): Promise<unknown> {
     const startedAt = this.sched.now();
     return new Promise<unknown>((resolve, reject) => {
       // The deadline covers everything queued AHEAD of this call too: on a
@@ -343,7 +355,6 @@ export class Connection {
       }, rpcDeadlineMs(budgetFor));
       this.inflightBytes += bytes;
       this.pending.set(id, { resolve, reject, timer, bytes, method, startedAt });
-      this.send(msg);
     });
   }
 
@@ -555,7 +566,7 @@ export class Connection {
       else this.sendRawBytes(socket, raw);
     }
     for (const id of this.attached) {
-      this.sendRaw(socket, encode({ type: "attach", sessionId: id, lastSeq: this.seen.get(id) ?? 0, binOut: true }));
+      this.sendRaw(socket, encode({ type: "attach", sessionId: id, lastSeq: this.seen.get(id) ?? 0, binOut: true, resumeId: this.resumes.get(id) }));
     }
     this.sendRaw(socket, encode({ type: "listSessions" }));
   }
@@ -626,6 +637,16 @@ export class Connection {
     }
     if (msg.type === "output") {
       this.handleOutput(msg.sessionId, msg.seq, fromB64(msg.data));
+    } else if (msg.type === "resumeMiss") {
+      // A miss for a superseded resume (detached and resumed again since) is stale.
+      const seed = this.resumeSeeds.get(msg.sessionId);
+      if (seed?.resumeId === msg.resumeId) this.resumeSeeds.delete(msg.sessionId);
+      if (this.resumes.get(msg.sessionId) === msg.resumeId) {
+        this.resumes.delete(msg.sessionId);
+        this.attached.delete(msg.sessionId);
+        const result = msg.seeded && seed?.resumeId === msg.resumeId ? seed.result : undefined;
+        for (const cb of this.resumeMissCbs) cb(msg.sessionId, result);
+      }
     } else if (msg.type === "resync") {
       for (const cb of this.resyncCbs) cb({ sessionId: msg.sessionId, from: msg.from });
     } else if (msg.type === "sessions") {
@@ -723,6 +744,8 @@ export class Connection {
       for (const cb of this.gapCbs) cb({ sessionId, expected: prev + 1, got: seq, missing: seq - prev - 1 });
     }
     if (seq > prev) this.seen.set(sessionId, seq);
+    this.resumes.delete(sessionId);
+    this.resumeSeeds.delete(sessionId);
     const f = { sessionId, seq, data };
     for (const cb of this.outputCbs) cb(f);
   }
@@ -923,6 +946,32 @@ export class Connection {
     if (subscribed || !this.transportReady()) return;
     this.send({ type: "attach", sessionId, lastSeq: seq, binOut: true });
   }
+  // For a screen holding exactly frames 1..lastSeq: the agent replays the gap or answers resumeMiss.
+  // seed: on a miss the agent also sends term.history(lines), passed to onResumeMiss.
+  resume(sessionId: string, lastSeq: number, seed?: { lines: number; expectBytes: number }): boolean {
+    if (this.attached.has(sessionId)) return false;
+    this.attached.add(sessionId);
+    this.seen.set(sessionId, lastSeq);
+    const resumeId = this.nextResumeId++;
+    this.resumes.set(sessionId, resumeId);
+    this.resumeSeeds.delete(sessionId);
+    if (!this.transportReady()) return true;
+    if (seed && this.features.has("resumeSeed")) {
+      const seedRpc = String(++this.rpcSeq);
+      const result = this.track(seedRpc, "term.history", seed.expectBytes);
+      result.catch(() => {});
+      this.resumeSeeds.set(sessionId, { resumeId, result });
+      this.send({ type: "attach", sessionId, lastSeq, binOut: true, resumeId, seedRpc, seedLines: seed.lines });
+    } else this.send({ type: "attach", sessionId, lastSeq, binOut: true, resumeId });
+    return true;
+  }
+  onResumeMiss(cb: (sessionId: string, seed?: Promise<unknown>) => void): () => void {
+    this.resumeMissCbs.push(cb);
+    return () => { this.resumeMissCbs = this.resumeMissCbs.filter((c) => c !== cb); };
+  }
+  seenSeq(sessionId: string): number {
+    return this.seen.get(sessionId) ?? 0;
+  }
   sendInput(sessionId: string, data: Uint8Array): void {
     this.send({ type: "input", sessionId, data: toB64(data) });
     // Local echo of the outbound path: every input source (custom keyboard,
@@ -959,6 +1008,8 @@ export class Connection {
     // 否则同名会话被重建时会拿着旧 seq 去要回放，开头那几帧会被当成「已经收过」而
     // 静默跳过。
     this.seen.delete(sessionId);
+    this.resumes.delete(sessionId);
+    this.resumeSeeds.delete(sessionId);
     this.send({ type: "renameSession", sessionId, name });
   }
   listDevices(): void { this.send({ type: "listDevices" }); }
@@ -1064,6 +1115,8 @@ export class Connection {
   }
   detach(sessionId: string): void {
     const wasAttached = this.attached.delete(sessionId);
+    this.resumes.delete(sessionId);
+    this.resumeSeeds.delete(sessionId);
     // `seen` is kept on purpose: re-attaching later (back to the foreground)
     // resumes the replay from the last received seq instead of refetching the
     // whole backlog. While the transport is down no frame is needed — a fresh

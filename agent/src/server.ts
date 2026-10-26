@@ -7,7 +7,7 @@ import type { ServerWebSocket } from "bun";
 import { loadConfig, type AgentConfig, resolveTlsMaterial, buildPairingString, resolveAdvertise } from "./config";
 import { TerminalService } from "./terminal";
 import { ShellService } from "./shell-service";
-import { ReplayService, tailWithinBudget, GAP_BACKFILL_BUDGET_BYTES, type OutputFrame } from "./replay";
+import { ReplayService, tailWithinBudget, GAP_BACKFILL_BUDGET_BYTES, RESUME_BUDGET_BYTES, type OutputFrame } from "./replay";
 import { OutputBatcher } from "./output-batcher";
 import { sweepTmp } from "./fs-service";
 import { RPC_FIT_SAFE_BYTES, RPC_CHUNK_PAYLOAD_BYTES, chunkRpcPayload } from "./rpc-fit";
@@ -101,7 +101,7 @@ interface Deps {
 // 这两个方法已经改成非二进制帧必抛（rpc-router.ts 的 blobOf），所以这个字段
 // **不是可选装饰，是让上传/保存不失败的必要前提**。两个 sessions 发送点
 // （广播 + listSessions 回复）共用同一个常量，防止两处各自维护漂移出偏差。
-const AGENT_FEATURES: string[] = ["bin", "binout"];
+const AGENT_FEATURES: string[] = ["bin", "binout", "resume", "resumeSeed"];
 
 // Unauthenticated sockets must finish the Noise handshake (or reach pairing) within this.
 const HANDSHAKE_TIMEOUT_MS = 10_000;
@@ -374,6 +374,7 @@ export function startServer(deps: Deps = {}) {
   });
   const onTermOutput = (name: string, chunk: Uint8Array) => batcher.push(name, chunk);
   terminal.onOutput(onTermOutput);
+  terminal.onSize((name, cols, rows) => replay.noteSize(name, cols, rows));
   const onTermExit = (name: string, code: number) => {
     contextStore.delete(name);
     batcher.flush(name); // deliver the session's tail bytes before the exit notice
@@ -639,6 +640,16 @@ export function startServer(deps: Deps = {}) {
   // Method-agnostic: covers fs.read/fs.diff/git.log/term.history and any future
   // large result. At/under RPC_FIT_SAFE_BYTES the single-frame fast path is
   // unchanged; ok:false replies are small and always go single-frame.
+  const rpcContext = (conn: Conn, id: string, acceptEnc: string[] | undefined, method: string) => ({
+    config: rpcConfig, terminal, shell, replay, notify, previewTokens,
+    claudeSettingsPath: toolPaths.claude, agentBin, doWire, runApply,
+    id,
+    devicePub: conn.remoteStatic,
+    sendResult: (result: unknown) => sendRpcResult(conn, id, result, acceptEnc, method),
+    sendBinary: (meta: Parameters<typeof sendRpcBinary>[2], blob: Uint8Array) => sendRpcBinary(conn, id, meta, blob, acceptEnc),
+    sendError: (code: string, message: string) => sendSecure(conn, { type: "response", id, ok: false, error: { code, message } }),
+  });
+
   const sendRpcResult = (
     conn: Conn,
     id: string,
@@ -788,12 +799,24 @@ export function startServer(deps: Deps = {}) {
         break;
       case "attach": {
         if (msg.binOut === true) conn.binOut = true;
-        conn.subscriptions.add(msg.sessionId);
+        // Before the coverage check: re-pinning a yielded window may resize it.
         if (!shell.has(msg.sessionId)) terminal.noteUse(msg.sessionId, deviceKey(conn));
+        const lastSeq = msg.lastSeq ?? 0;
+        const seedRpc = typeof msg.resumeId === "number" && typeof msg.seedRpc === "string" ? msg.seedRpc : undefined;
+        if (typeof msg.resumeId === "number" && !replay.covers(msg.sessionId, lastSeq, RESUME_BUDGET_BYTES)) {
+          sendSecure(conn, { type: "resumeMiss", sessionId: msg.sessionId, resumeId: msg.resumeId, seeded: seedRpc !== undefined || undefined });
+          diagLog({ tag: msg.sessionId, kind: "attach", lastSeq, resume: "miss" });
+          // Saves the client a round trip: the snapshot it would request next.
+          if (seedRpc !== undefined) {
+            void dispatchRpc(rpcContext(conn, seedRpc, ["gzip", "bin"], "term.history"), "term.history",
+              { session: msg.sessionId, lines: msg.seedLines });
+          }
+          break;
+        }
+        conn.subscriptions.add(msg.sessionId);
         // The replay backfill below is itself the resync for this conn, so any
         // pending backpressure-resync flag for the session is stale.
         conn.needsResyncSessions.delete(msg.sessionId);
-        const lastSeq = msg.lastSeq ?? 0;
         const { frames, gap, oldestSeq } = replay.since(msg.sessionId, lastSeq);
         if (gap) sendSecure(conn, { type: "resync", sessionId: msg.sessionId, from: oldestSeq });
         // gap 时只补发最新的一段（预算与「为什么不能干脆不发」的四个反例见
@@ -806,10 +829,11 @@ export function startServer(deps: Deps = {}) {
         // 限量是否生效的唯一依据。attach 只在重连/挂载时发生（重复 attach 被
         // connection.ts 的 subscribed 判断挡在客户端），不会刷屏。
         diagLog({
-          tag: msg.sessionId, kind: "attach", lastSeq, gap,
+          tag: msg.sessionId, kind: "attach", lastSeq, gap, resume: typeof msg.resumeId === "number" ? "hit" : undefined,
           frames: send.length,
           bytes: send.reduce((n, f) => n + f.data.byteLength, 0),
         });
+        if (seedRpc !== undefined) sendSecure(conn, { type: "response", id: seedRpc, ok: true, result: { hit: true } });
         break;
       }
       case "detach":
@@ -845,7 +869,10 @@ export function startServer(deps: Deps = {}) {
         // 根因，这里再挡一道，保证任何版本/任何实现的客户端都毁不掉用户的历史。
         // 丢弃而非夹取：夹到 20 列照样污染，保住上一次的正确尺寸才是对的。
         if (!isSaneSize(msg.cols, msg.rows)) break;
-        if (shell.has(msg.sessionId)) shell.resize(msg.sessionId, msg.cols, msg.rows);
+        if (shell.has(msg.sessionId)) {
+          shell.resize(msg.sessionId, msg.cols, msg.rows);
+          replay.noteSize(msg.sessionId, msg.cols, msg.rows);
+        }
         else {
           terminal.noteUse(msg.sessionId, deviceKey(conn), { cols: msg.cols, rows: msg.rows });
           terminal.resize(msg.sessionId, msg.cols, msg.rows);
@@ -947,19 +974,7 @@ export function startServer(deps: Deps = {}) {
         // handler answers through sendResult/sendError below — including the
         // four that answer themselves (notify.testWebhook / update.check /
         // update.apply, all async) and the unknown-method fallback.
-        return dispatchRpc(
-          {
-            config: rpcConfig, terminal, shell, replay, notify, previewTokens,
-            claudeSettingsPath: toolPaths.claude, agentBin, doWire, runApply,
-            id,
-            devicePub: conn.remoteStatic,
-            sendResult: (result) => sendRpcResult(conn, id, result, acceptEnc, method),
-            sendBinary: (meta, blob) => sendRpcBinary(conn, id, meta, blob, acceptEnc),
-            sendError: (code, message) => sendSecure(conn, { type: "response", id, ok: false, error: { code, message } }),
-          },
-          method,
-          p2,
-        );
+        return dispatchRpc(rpcContext(conn, id, acceptEnc, method), method, p2);
       }
       default: sendSecure(conn, { type: "error", code: "unknown_type", message: "unknown message type" }); break;
     }

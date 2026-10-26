@@ -926,11 +926,12 @@
     };
 
     type HistorySnapshot = { text: string; seq: number };
-    const loadHistorySnapshot = async (lines: number): Promise<HistorySnapshot> => {
-      const h = (await conn.rpc(
-        "term.history", { session: sessionId, lines },
-        { expectBytes: historyExpectBytes(lines) },
-      )) as TermHistoryResult;
+    const loadHistorySnapshot = async (lines: number): Promise<HistorySnapshot> => decodeSnapshot(conn.rpc(
+      "term.history", { session: sessionId, lines },
+      { expectBytes: historyExpectBytes(lines) },
+    ));
+    const decodeSnapshot = async (reply: Promise<unknown>): Promise<HistorySnapshot> => {
+      const h = (await reply) as TermHistoryResult;
       return {
         text: h?.data ? await decodeHistoryData(h.data, h.enc) : "",
         seq: typeof h?.seq === "number" ? h.seq : 0,
@@ -951,6 +952,8 @@
     let historyInFlight = false;
     let historyMode: "seed" | "online" | "offline" | null = null;
     let offlineQueued = false;
+    // The agent's term.history reply that came with a resumeMiss; used once by resumeFromHistory.
+    let seededHistory: Promise<unknown> | undefined;
     let seedQueuedAttempt: number | null = null;
     let drainHistoryQueue: () => void = () => {};
     type RecoveryRetry = {
@@ -967,6 +970,10 @@
     // Keep the failed lane explicit: offline still owns the required seeded
     // attach, while online must retain its live-window recovery semantics.
     let failedRecovery: FailedRecovery | null = null;
+    // Seq that xterm plus pendingOut reflect exactly when the stream stopped; null = reseed on return.
+    let resumeSeq: number | null = null;
+    // A bigger stash costs more to keep and to parse than a reseed.
+    const RESUME_STASH_MAX_BYTES = 256 * 1024;
 
     const cancelRecoveryRetry = () => {
       if (recoveryRetryTimer) clearTimeout(recoveryRetryTimer);
@@ -1155,7 +1162,7 @@
       void runReseed(trigger);
     }
     recoverOnActivate = () => {
-      if (!needsReseed) return;
+      if (!needsReseed || resumeSeq !== null) return;
       if (recoveryRetryTimer) return;
       if (seedFailed && failedRecovery) return;
       if (offlineQueued) { drainHistoryQueue(); return; }
@@ -1290,7 +1297,8 @@
         // An alt-screen app is repainted in place: the snapshot would land in
         // the normal buffer and hide its screen until the next poll redraws it.
         const altPane = appliedMode === "alt" && currentBuffer === "alternate";
-        const pending = loadHistorySnapshot(historyLines);
+        const pending = seededHistory ? decodeSnapshot(seededHistory) : loadHistorySnapshot(historyLines);
+        seededHistory = undefined;
         // Sent after the history request, so the repaint lands after its seq.
         if (altPane) void conn.rpc("term.redraw", { session: sessionId }).catch(() => {});
         const snapshot = await pending;
@@ -1402,9 +1410,13 @@
     };
 
     stopStreaming = () => {
+      const intact = hasStreamed && !needsReseed && !seeding && !historyInFlight && !pendingOut.dirty
+        && pendingOut.size <= RESUME_STASH_MAX_BYTES && !seedFailed && !closed && typeof conn.seenSeq === "function";
+      resumeSeq = intact ? conn.seenSeq(sessionId) : null;
+      seededHistory = undefined;
       recoveryGeneration++;
       conn.detach(sessionId);
-      pendingOut.take();
+      if (resumeSeq === null) pendingOut.take();
       pendingOut.clearDirty();
       cancelSeedRetry();
       cancelRecoveryRetry();
@@ -1581,9 +1593,27 @@
         void seedFromHistory();
         return;
       }
+      const seq = resumeSeq;
+      resumeSeq = null;
+      const seed = { lines: historyLines, expectBytes: historyExpectBytes(historyLines) };
+      if (seq !== null && conn.hasFeature?.("resume") && conn.resume(sessionId, seq, seed)) {
+        needsReseed = false;
+        // Stashed bytes precede the replayed gap.
+        if (active) flushPending();
+        return;
+      }
+      resumeFromHistoryOnReturn();
+    };
+    const resumeFromHistoryOnReturn = (seed?: Promise<unknown>) => {
+      seededHistory = seed;
+      pendingOut.take();
+      needsReseed = true;
       offlineQueued = true;
       drainHistoryQueue();
     };
+    const unsubscribeResumeMiss = conn.onResumeMiss?.((id, seed) => {
+      if (id === sessionId && streaming && !destroyed) resumeFromHistoryOnReturn(seed);
+    });
     // 只有活动的 tab 才在挂载时 refit。非活动 tab 此刻是 display:none，量不到自己，
     // 而它上报的塌陷尺寸会把**共享的 tmux 会话**拽窄、连带污染别人的历史。
     // refit() 内部也有 isMeasurable 守卫，这里显式判 active 是让意图落在代码上：
@@ -1665,6 +1695,7 @@
       ro?.disconnect();
       themeObs?.disconnect();
       unsubscribeOutput?.();
+      unsubscribeResumeMiss?.();
       unsubscribeInput?.();
       if (resizeDebounce) clearTimeout(resizeDebounce);
       // 埋点的两个订阅（2026-08-22）。心跳往一个已 dispose 的终端读 buffer 会抛，

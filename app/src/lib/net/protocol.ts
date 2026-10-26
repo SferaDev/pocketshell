@@ -38,7 +38,9 @@ export interface Hint { id: string; text: string }
 
 export type ClientMsg =
   // binOut: take output as binary frames (header {type,sessionId,seq}, raw bytes as blob).
-  | { type: "attach"; sessionId: string; lastSeq?: number; binOut?: boolean }
+  // resumeId: the screen holds frames 1..lastSeq; replay if faithful, else resumeMiss.
+  // seedRpc: answer this rpc id with {hit:true}, or after a resumeMiss with term.history(seedLines).
+  | { type: "attach"; sessionId: string; lastSeq?: number; binOut?: boolean; resumeId?: number; seedRpc?: string; seedLines?: number }
   | { type: "detach"; sessionId: string }
   | { type: "input"; sessionId: string; data: string }
   | { type: "resize"; sessionId: string; cols: number; rows: number }
@@ -83,6 +85,8 @@ export type ServerMsg =
   | { type: "pong" }
   | { type: "notification"; sessionId: string; title: string; body: string; ts: number }
   | { type: "resync"; sessionId: string; from: number }
+  // Reply to a resume attach the replay buffer cannot serve; the session is not subscribed.
+  | { type: "resumeMiss"; sessionId: string; resumeId: number; seeded?: boolean }
   | { type: "paired"; ok: true }
   | { type: "devices"; devices: DeviceInfo[] }
   | { type: "snippets"; items: Snippet[] }

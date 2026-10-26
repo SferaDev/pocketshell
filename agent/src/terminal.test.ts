@@ -1389,3 +1389,17 @@ describe("通道看门狗 watchdogTick", () => {
     h.term.dispose();
   });
 });
+
+test("onSize reports our own resizes and each scan's window size for owned sessions", async () => {
+  const term = new TerminalService({
+    tmux: (args) => (args[0] === "display-message" ? ok("@3\n") : ok()),
+    tmuxAsync: async (args) => (args.includes("list-sessions") ? ok(rosterLine("a") + rosterLine("foreign")) : ok()),
+  });
+  const sizes: [string, number, number][] = [];
+  term.onSize((n, c, r) => sizes.push([n, c, r]));
+  plant(term, "a");
+  term.resize("a", 41, 20);
+  await (term as any).scanAsync();
+  expect(sizes).toEqual([["a", 41, 20], ["a", 80, 24]]);
+  term.dispose();
+});

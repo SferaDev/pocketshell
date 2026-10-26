@@ -1812,3 +1812,91 @@ describe("binary output frames", () => {
     expect(got).toEqual([]);
   });
 });
+
+describe("resume attach", () => {
+  const lastSent = (h: ReturnType<typeof harness>) => decodeClient(new TextDecoder().decode(h.sent[h.sent.length - 1])) as any;
+
+  it("sends lastSeq with a resumeId and overrides seen", () => {
+    const h = harness();
+    h.deliver({ type: "output", sessionId: "s1", seq: 9, data: toB64(new Uint8Array([65])) });
+    expect(h.conn.seenSeq("s1")).toBe(9);
+    expect(h.conn.resume("s1", 6)).toBe(true);
+    const att = lastSent(h);
+    expect(att).toMatchObject({ type: "attach", sessionId: "s1", lastSeq: 6, binOut: true });
+    expect(typeof att.resumeId).toBe("number");
+    expect(h.conn.seenSeq("s1")).toBe(6);
+  });
+
+  it("refuses when the session is already subscribed", () => {
+    const h = harness();
+    h.conn.attach("s1");
+    const n = h.sent.length;
+    expect(h.conn.resume("s1", 3)).toBe(false);
+    expect(h.sent.length).toBe(n);
+  });
+
+  it("a miss unsubscribes locally so the fallback seeded attach is really sent", () => {
+    const h = harness();
+    const misses: string[] = [];
+    h.conn.onResumeMiss((id) => misses.push(id));
+    h.conn.resume("s1", 4);
+    const { resumeId } = lastSent(h);
+    h.deliver({ type: "resumeMiss", sessionId: "s1", resumeId });
+    expect(misses).toEqual(["s1"]);
+    h.conn.attach("s1", 20, { seed: true });
+    expect(lastSent(h)).toEqual({ type: "attach", sessionId: "s1", lastSeq: 20, binOut: true });
+  });
+
+  it("a seeded resume hands the agent's history reply to the miss callback", async () => {
+    const h = harness();
+    (h.conn as any).features = new Set(["resume", "resumeSeed"]);
+    const seeds: Promise<unknown>[] = [];
+    h.conn.onResumeMiss((_id, seed) => { if (seed) seeds.push(seed); });
+    h.conn.resume("s1", 4, { lines: 100, expectBytes: 1000 });
+    const att = lastSent(h);
+    expect(att).toMatchObject({ seedLines: 100 });
+    expect(typeof att.seedRpc).toBe("string");
+    h.deliver({ type: "resumeMiss", sessionId: "s1", resumeId: att.resumeId, seeded: true });
+    h.deliver({ type: "response", id: att.seedRpc, ok: true, result: { data: "", seq: 12 } });
+    expect(seeds).toHaveLength(1);
+    await expect(seeds[0]).resolves.toEqual({ data: "", seq: 12 });
+  });
+
+  it("asks for no seed from an agent without resumeSeed", () => {
+    const h = harness();
+    h.conn.resume("s1", 4, { lines: 100, expectBytes: 1000 });
+    expect(lastSent(h).seedRpc).toBeUndefined();
+  });
+
+  it("ignores a miss for a superseded resume", () => {
+    const h = harness();
+    const misses: string[] = [];
+    h.conn.onResumeMiss((id) => misses.push(id));
+    h.conn.resume("s1", 4);
+    const first = lastSent(h).resumeId;
+    h.conn.detach("s1");
+    h.conn.resume("s1", 4);
+    h.deliver({ type: "resumeMiss", sessionId: "s1", resumeId: first });
+    expect(misses).toEqual([]);
+  });
+
+  it("is resent as a resume on reconnect until output confirms it", () => {
+    const { sched, advance } = makeFakeScheduler();
+    const created: FakeWS[] = [];
+    const conn = new Connection({ url: "ws://x", scheduler: sched, random: () => 0.5, wsFactory: () => { const w = new FakeWS(); created.push(w); return w; }, channelFactory: passthroughInitiator });
+    completeHandshake(created[0]);
+    conn.resume("s1", 4);
+    const { resumeId } = decodeMsg(businessSent(created[0]).at(-1)!);
+    created[0].close();
+    advance(500);
+    completeHandshake(created[1]);
+    const msgs = businessSent(created[1]).map((b) => decodeMsg(b));
+    expect(msgs).toContainEqual({ type: "attach", sessionId: "s1", lastSeq: 4, binOut: true, resumeId });
+    created[1].emit(encode({ type: "output", sessionId: "s1", seq: 5, data: toB64(new Uint8Array([65])) }));
+    created[1].emit(encode({ type: "resumeMiss", sessionId: "s1", resumeId }));
+    const n = created[1].sent.length;
+    conn.attach("s1");
+    expect(created[1].sent.length).toBe(n); // still subscribed: the late miss was ignored
+    conn.dispose();
+  });
+});

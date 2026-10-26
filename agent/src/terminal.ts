@@ -124,6 +124,7 @@ export class TerminalService {
   private outputCbs: ((name: string, chunk: Uint8Array) => void)[] = [];
   private exitCbs: ((name: string, code: number) => void)[] = [];
   private sessionsChangeCbs: (() => void)[] = [];
+  private sizeCbs: ((name: string, cols: number, rows: number) => void)[] = [];
   // Published per-session states with flip hysteresis (WP-3a). Fed ONLY by
   // the 1s scanner; list() reads these instead of re-inferring per call, so a
   // bursty session's run/wait flap neither reaches clients nor re-triggers
@@ -252,6 +253,10 @@ export class TerminalService {
   onSessionsChange(cb: () => void): void {
     this.sessionsChangeCbs.push(cb);
   }
+  // Window size as seen by our own resizes and each scan, including other tmux clients'.
+  onSize(cb: (name: string, cols: number, rows: number) => void): void {
+    this.sizeCbs.push(cb);
+  }
 
   private emitSessionsChange(): void {
     for (const cb of this.sessionsChangeCbs) cb();
@@ -317,7 +322,9 @@ export class TerminalService {
       this.reap(name, 0);
     }
     for (const [name, row] of rows ?? []) {
-      if (row.windowId && this.sessions.has(name)) this.windowIds.set(name, row.windowId);
+      if (!this.sessions.has(name)) continue;
+      if (row.windowId) this.windowIds.set(name, row.windowId);
+      for (const cb of this.sizeCbs) cb(name, row.cols, row.rows);
     }
     await this.watchdogTick(now, rows ?? undefined);
     await this.arbitrateWindows();
@@ -969,6 +976,7 @@ export class TerminalService {
     if (changed) this.persistAdopted();
     live.pty.resize(cols, rows);
     this.markPinned(name);
+    for (const cb of this.sizeCbs) cb(name, cols, rows);
   }
 
   async kill(name: string): Promise<void> {

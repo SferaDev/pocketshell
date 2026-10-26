@@ -12,6 +12,8 @@ interface SessionReplay {
   oldestSeq: number; // seq of the oldest frame still in `ring` (0 if empty)
   bytes: number;
   ring: OutputFrame[];
+  size?: { cols: number; rows: number };
+  resizedAfterSeq: number | null; // latest seq when the pane last changed size
 }
 
 const DEFAULT_CAP = 256 * 1024;
@@ -41,6 +43,9 @@ const DEFAULT_CAP = 256 * 1024;
 // 即 gap 路径省下约 87% 的字节。
 export const GAP_BACKFILL_BUDGET_BYTES = 32 * 1024;
 
+// Past this a resumed tab reseeds instead: a gzipped history snapshot is smaller on a slow link.
+export const RESUME_BUDGET_BYTES = 64 * 1024;
+
 /**
  * 从积压里取「最新的一段」，总字节不超过 budget，**保持时间顺序**。
  *
@@ -68,7 +73,7 @@ export class ReplayService {
   private get(sessionId: string): SessionReplay {
     let s = this.sessions.get(sessionId);
     if (!s) {
-      s = { nextSeq: 1, oldestSeq: 0, bytes: 0, ring: [] };
+      s = { nextSeq: 1, oldestSeq: 0, bytes: 0, ring: [], resizedAfterSeq: null };
       this.sessions.set(sessionId, s);
     }
     return s;
@@ -98,6 +103,28 @@ export class ReplayService {
     const gap = lastSeq + 1 < s.oldestSeq;
     const frames = s.ring.filter((f) => f.seq > lastSeq);
     return { frames, gap, oldestSeq: s.oldestSeq };
+  }
+
+  noteSize(sessionId: string, cols: number, rows: number): void {
+    const s = this.get(sessionId);
+    if (s.size && (s.size.cols !== cols || s.size.rows !== rows)) s.resizedAfterSeq = s.nextSeq - 1;
+    s.size = { cols, rows };
+  }
+
+  // Whether frames after lastSeq replay faithfully (none evicted, no resize since) within maxBytes.
+  covers(sessionId: string, lastSeq: number, maxBytes = Infinity): boolean {
+    const s = this.sessions.get(sessionId);
+    if (!s) return lastSeq === 0;
+    const latest = s.nextSeq - 1;
+    if (lastSeq > latest || (s.resizedAfterSeq !== null && lastSeq <= s.resizedAfterSeq)) return false;
+    if (lastSeq === latest) return true;
+    if (lastSeq + 1 < s.oldestSeq) return false;
+    let bytes = 0;
+    for (let i = s.ring.length - 1; i >= 0 && s.ring[i].seq > lastSeq; i--) {
+      bytes += s.ring[i].data.byteLength;
+      if (bytes > maxBytes) return false;
+    }
+    return true;
   }
 
   latestSeq(sessionId: string): number {

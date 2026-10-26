@@ -139,3 +139,54 @@ test("the default gap budget covers a worst-case phone screen but is a fraction 
   expect(GAP_BACKFILL_BUDGET_BYTES).toBeGreaterThanOrEqual(27 * 61 * 10);
   expect(GAP_BACKFILL_BUDGET_BYTES).toBeLessThanOrEqual(256 * 1024 / 4);
 });
+
+test("covers: everything after lastSeq still retained", () => {
+  const r = new ReplayService();
+  for (const s of ["a", "b", "c"]) r.ingest("s", b(s));
+  expect(r.covers("s", 0)).toBe(true);
+  expect(r.covers("s", 2)).toBe(true);
+  expect(r.covers("s", 3)).toBe(true);
+});
+
+test("covers: false once frames after lastSeq were evicted", () => {
+  const r = new ReplayService(4);
+  for (const s of ["aa", "bb", "cc"]) r.ingest("s", b(s)); // keeps seq 2..3
+  expect(r.covers("s", 1)).toBe(true);
+  expect(r.covers("s", 0)).toBe(false);
+});
+
+test("covers: false when lastSeq is ahead of the ring (seq space restarted)", () => {
+  const r = new ReplayService();
+  r.ingest("s", b("a"));
+  expect(r.covers("s", 5)).toBe(false);
+  expect(r.covers("unknown", 5)).toBe(false);
+  expect(r.covers("unknown", 0)).toBe(true);
+});
+
+test("covers: a size change invalidates clients that had not seen output after it", () => {
+  const r = new ReplayService();
+  r.noteSize("s", 40, 20);
+  r.ingest("s", b("a"));
+  r.noteSize("s", 40, 20); // unchanged: no effect
+  expect(r.covers("s", 1)).toBe(true);
+  r.noteSize("s", 120, 40);
+  expect(r.covers("s", 1)).toBe(false);
+  r.ingest("s", b("redraw"));
+  expect(r.covers("s", 1)).toBe(false);
+  expect(r.covers("s", 2)).toBe(true); // this client received the post-resize redraw
+});
+
+test("covers: the first size observation is a baseline, not a change", () => {
+  const r = new ReplayService();
+  r.ingest("s", b("a"));
+  r.noteSize("s", 80, 24);
+  expect(r.covers("s", 0)).toBe(true);
+});
+
+test("covers: false when the gap exceeds maxBytes", () => {
+  const r = new ReplayService();
+  for (const s of ["aaaa", "bbbb", "cccc"]) r.ingest("s", b(s));
+  expect(r.covers("s", 1, 8)).toBe(true);
+  expect(r.covers("s", 0, 8)).toBe(false);
+  expect(r.covers("s", 3, 0)).toBe(true);
+});

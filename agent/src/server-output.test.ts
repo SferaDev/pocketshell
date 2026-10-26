@@ -5,7 +5,7 @@ import { test, expect } from "bun:test";
 import { startServer } from "./server";
 import type { SecureChannel } from "./secure-channel";
 import { encode, decodeServer } from "./protocol";
-import { ReplayService, GAP_BACKFILL_BUDGET_BYTES } from "./replay";
+import { ReplayService, GAP_BACKFILL_BUDGET_BYTES, RESUME_BUDGET_BYTES } from "./replay";
 import { TerminalService } from "./terminal";
 import { fromB64 } from "./bytes";
 import { unpackBinFrame, BIN_FRAME_MAGIC } from "./binframe";
@@ -533,5 +533,126 @@ test("binout: the opt-in is per connection and survives later attaches without t
   attach(srv, ws, "b");
   srv.__test.emitOutput("b", b("x"));
   expect(binOutputs(ws).map((f) => f.header.sessionId)).toEqual(["b"]);
+  srv.stop();
+});
+
+// --- resume attach -------------------------------------------------------------
+
+const resumeAttach = (srv: ReturnType<typeof startServer>, ws: FakeWs, sessionId: string, lastSeq: number, resumeId = 1) =>
+  srv.__test.message(ws as any, utf8(encode({ type: "attach", sessionId, lastSeq, binOut: true, resumeId })));
+
+test("resume: a covered gap is replayed in full and the session is subscribed", () => {
+  const replay = new ReplayService();
+  const srv = startServer({ port: 0, channelFactory: passthroughResponder, replay });
+  const ws = fakeWs();
+  openReady(srv, ws);
+  for (const s of ["one", "two", "three"]) replay.ingest("s", b(s));
+  resumeAttach(srv, ws, "s", 1);
+  expect(binOutputs(ws).map((f) => f.header.seq)).toEqual([2, 3]);
+  expect(ws.sent.every((f) => f[0] === BIN_FRAME_MAGIC)).toBe(true); // no resync, no miss
+  ws.sent.length = 0;
+  srv.__test.emitOutput("s", b("live"));
+  expect(binOutputs(ws).map((f) => f.header.seq)).toEqual([4]);
+  srv.stop();
+});
+
+test("resume: an evicted gap answers resumeMiss, sends no output and does not subscribe", () => {
+  const replay = new ReplayService(4);
+  const srv = startServer({ port: 0, channelFactory: passthroughResponder, replay });
+  const ws = fakeWs();
+  openReady(srv, ws);
+  for (const s of ["aa", "bb", "cc"]) replay.ingest("s", b(s));
+  resumeAttach(srv, ws, "s", 0, 7);
+  expect(frames(ws)).toEqual([{ type: "resumeMiss", sessionId: "s", resumeId: 7 }]);
+  ws.sent.length = 0;
+  srv.__test.emitOutput("s", b("live"));
+  expect(ws.sent.length).toBe(0);
+  srv.stop();
+});
+
+test("resume: a pane resize after lastSeq answers resumeMiss", () => {
+  const replay = new ReplayService();
+  const srv = startServer({ port: 0, channelFactory: passthroughResponder, replay });
+  const ws = fakeWs();
+  openReady(srv, ws);
+  replay.noteSize("s", 40, 20);
+  replay.ingest("s", b("a"));
+  replay.noteSize("s", 200, 50);
+  replay.ingest("s", b("b"));
+  resumeAttach(srv, ws, "s", 1);
+  expect(frames(ws).map((m) => m.type)).toEqual(["resumeMiss"]);
+  srv.stop();
+});
+
+test("resume: a seq ahead of the ring (agent restarted) answers resumeMiss", () => {
+  const replay = new ReplayService();
+  const srv = startServer({ port: 0, channelFactory: passthroughResponder, replay });
+  const ws = fakeWs();
+  openReady(srv, ws);
+  replay.ingest("s", b("a"));
+  resumeAttach(srv, ws, "s", 500);
+  expect(frames(ws).map((m) => m.type)).toEqual(["resumeMiss"]);
+  srv.stop();
+});
+
+test("resume: a plain attach keeps the gap/resync semantics even when a resize happened", () => {
+  const replay = new ReplayService();
+  const srv = startServer({ port: 0, channelFactory: passthroughResponder, replay });
+  const ws = fakeWs();
+  openReady(srv, ws);
+  replay.noteSize("s", 40, 20);
+  replay.ingest("s", b("a"));
+  replay.noteSize("s", 200, 50);
+  replay.ingest("s", b("b"));
+  srv.__test.message(ws as any, utf8(encode({ type: "attach", sessionId: "s", lastSeq: 1 })));
+  expect(outputs(ws).map((m) => (m as { seq: number }).seq)).toEqual([2]);
+  srv.stop();
+});
+
+test("resume: a gap larger than the resume budget answers resumeMiss", () => {
+  const replay = new ReplayService(1024 * 1024);
+  const srv = startServer({ port: 0, channelFactory: passthroughResponder, replay });
+  const ws = fakeWs();
+  openReady(srv, ws);
+  replay.ingest("s", b("a"));
+  replay.ingest("s", new Uint8Array(RESUME_BUDGET_BYTES + 1));
+  resumeAttach(srv, ws, "s", 1);
+  expect(frames(ws).map((m) => m.type)).toEqual(["resumeMiss"]);
+  srv.stop();
+});
+
+const seededResume = (srv: ReturnType<typeof startServer>, ws: FakeWs, sessionId: string, lastSeq: number, seedRpc: string) =>
+  srv.__test.message(ws as any, utf8(encode({ type: "attach", sessionId, lastSeq, binOut: true, resumeId: 1, seedRpc, seedLines: 100 })));
+// Header of every frame, JSON or binary, in send order.
+const headers = (ws: FakeWs) => ws.sent.map((f) => (f[0] === BIN_FRAME_MAGIC
+  ? unpackBinFrame(f)!.header
+  : decodeServer(Buffer.from(f).toString("utf8")))) as { type: string; id?: string; seeded?: boolean; result?: unknown }[];
+
+test("resume: a seeded miss sends resumeMiss and then the history reply under the client's rpc id", async () => {
+  const replay = new ReplayService(4);
+  const terminal = new TerminalService({ tmux: (args) => ({ exitCode: 0, stdout: utf8(args.includes("capture-pane") ? "SCREEN\n" : ""), stderr: new Uint8Array() }) });
+  const srv = startServer({ port: 0, channelFactory: passthroughResponder, replay, terminal });
+  const ws = fakeWs();
+  openReady(srv, ws);
+  for (const s of ["aa", "bb", "cc"]) replay.ingest("s", b(s));
+  seededResume(srv, ws, "s", 0, "r9");
+  for (let i = 0; i < 100 && ws.sent.length < 2; i++) await new Promise((r) => setTimeout(r, 1));
+  const h = headers(ws);
+  expect(h[0]).toMatchObject({ type: "resumeMiss", seeded: true });
+  expect(h[1].id).toBe("r9");
+  expect(["response", "rpcZip"]).toContain(h[1].type);
+  srv.stop();
+  terminal.dispose();
+});
+
+test("resume: a seeded hit replays the gap, then acknowledges the rpc id", () => {
+  const replay = new ReplayService();
+  const srv = startServer({ port: 0, channelFactory: passthroughResponder, replay });
+  const ws = fakeWs();
+  openReady(srv, ws);
+  for (const s of ["one", "two"]) replay.ingest("s", b(s));
+  seededResume(srv, ws, "s", 1, "r3");
+  expect(headers(ws).map((m) => m.type)).toEqual(["output", "response"]);
+  expect(headers(ws)[1]).toMatchObject({ id: "r3", result: { hit: true } });
   srv.stop();
 });

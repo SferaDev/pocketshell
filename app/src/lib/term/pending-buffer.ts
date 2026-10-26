@@ -115,4 +115,8 @@ export class PendingBuffer {
   clearDirty(): void {
     this.dirty = false;
   }
+
+  get size(): number {
+    return this.bytes;
+  }
 }
