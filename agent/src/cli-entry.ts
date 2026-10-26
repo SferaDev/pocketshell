@@ -22,6 +22,9 @@ import { chainPathOf, readChain } from "./statusline-wire";
 import { resolveNotifyRuntime } from "./notify-runtime";
 import { codexNotifyChainPath, readCodexNotifyChain } from "./notify-wire";
 import { homedir } from "node:os";
+import { readFileSync } from "node:fs";
+import { advertiseFromUnit, keyDirFromUnit } from "./install-runner";
+import { unitPathFor } from "./tunnel-runner";
 import { join } from "node:path";
 
 /** Just enough of startServer's shape for the boot branch (avoids an import cycle). */
@@ -49,10 +52,22 @@ export async function runCliDevices(argv: string[]): Promise<number> {
   const now = Date.now();
   const code = generatePairingCode();
   writePendingPairing(cfg.keyDir, { code, expiresAt: now + 300_000, maxAttempts: 5, mintedAt: now });
-  const advertise = resolveAdvertise(cfg);
+  const advertise = cfg.advertise ? resolveAdvertise(cfg) : installedAdvertise(cfg.keyDir) ?? resolveAdvertise(cfg);
   console.log(buildPairingString(cfg.identity.publicKey, advertise, code));
   console.log("\nPairing code valid for 300s. Paste the string above into the app; a running agent picks it up automatically.");
   return 0;
+}
+
+// `pair` from a shell lacks the service's POCKETSHELL_ADVERTISE; take it from a unit serving this keyDir.
+export function installedAdvertise(keyDir: string, read = (p: string) => readFileSync(p, "utf8")): string | null {
+  const unitPath = unitPathFor(process.platform, homedir());
+  if (!unitPath) return null;
+  try {
+    const unit = read(unitPath);
+    return keyDirFromUnit(unit) === keyDir ? advertiseFromUnit(unit) : null;
+  } catch {
+    return null;
+  }
 }
 
 // Service install/uninstall never boots the server (same shape as the

@@ -303,6 +303,15 @@ export function keyDirFromUnit(unitText: string): string | null {
   return null;
 }
 
+// The address `install --advertise` wrote into the unit; agent.json never gets it.
+export function advertiseFromUnit(unitText: string): string | null {
+  const systemd = /^Environment=POCKETSHELL_ADVERTISE=(.+)$/m.exec(unitText);
+  if (systemd) return systemd[1].trim();
+  const launchd = /<key>POCKETSHELL_ADVERTISE<\/key>\s*<string>([^<]*)<\/string>/.exec(unitText);
+  if (launchd) return launchd[1].trim();
+  return null;
+}
+
 async function bootstrapLaunchd(plan: InstallPlan): Promise<number> {
   const uid = typeof process.getuid === "function" ? process.getuid() : 0;
   const domain = launchdDomain(uid);

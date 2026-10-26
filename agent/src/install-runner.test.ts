@@ -236,3 +236,10 @@ test("lockToRoot sets the requested mode (chown to root needs privileges, so onl
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("advertiseFromUnit reads POCKETSHELL_ADVERTISE from either unit format", async () => {
+  const { advertiseFromUnit } = await import("./install-runner");
+  expect(advertiseFromUnit("Environment=POCKETSHELL_ADVERTISE=wss://box.example:8443\n")).toBe("wss://box.example:8443");
+  expect(advertiseFromUnit("<key>POCKETSHELL_ADVERTISE</key><string>wss://box.ts.net:8443</string>")).toBe("wss://box.ts.net:8443");
+  expect(advertiseFromUnit("Environment=POCKETSHELL_HOST=127.0.0.1\n")).toBeNull();
+});
