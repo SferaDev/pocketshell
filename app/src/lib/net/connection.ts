@@ -555,7 +555,7 @@ export class Connection {
       else this.sendRawBytes(socket, raw);
     }
     for (const id of this.attached) {
-      this.sendRaw(socket, encode({ type: "attach", sessionId: id, lastSeq: this.seen.get(id) ?? 0 }));
+      this.sendRaw(socket, encode({ type: "attach", sessionId: id, lastSeq: this.seen.get(id) ?? 0, binOut: true }));
     }
     this.sendRaw(socket, encode({ type: "listSessions" }));
   }
@@ -625,21 +625,7 @@ export class Connection {
       return;
     }
     if (msg.type === "output") {
-      const prev = this.seen.get(msg.sessionId) ?? 0;
-      // 【2026-08-22】seq 缺口检测。「内容中间少几行、上下都在」这类故障靠
-      // 症状分不清是哪条路径丢的（背压主动丢帧 / 传输静默丢 / 渲染层），而
-      // seq 是服务端单调递增发的，缺号即丢帧且能定位到具体区间。
-      //
-      // 只在 prev>0（已建立记账）且真的跳号时上报，两个条件缺一不可：
-      //   - prev===0 是首帧或 seed 之后，此时跳号是正常的（服务端从快照 seq
-      //     之后开始发，客户端本来就没见过中间那些）；
-      //   - seq<=prev 是重发/乱序，不是缺口，且 attach 后必然出现一批。
-      if (prev > 0 && msg.seq > prev + 1) {
-        for (const cb of this.gapCbs) cb({ sessionId: msg.sessionId, expected: prev + 1, got: msg.seq, missing: msg.seq - prev - 1 });
-      }
-      if (msg.seq > prev) this.seen.set(msg.sessionId, msg.seq);
-      const f = { sessionId: msg.sessionId, seq: msg.seq, data: fromB64(msg.data) };
-      for (const cb of this.outputCbs) cb(f);
+      this.handleOutput(msg.sessionId, msg.seq, fromB64(msg.data));
     } else if (msg.type === "resync") {
       for (const cb of this.resyncCbs) cb({ sessionId: msg.sessionId, from: msg.from });
     } else if (msg.type === "sessions") {
@@ -723,12 +709,33 @@ export class Connection {
     }
   }
 
+  private handleOutput(sessionId: string, seq: number, data: Uint8Array): void {
+    const prev = this.seen.get(sessionId) ?? 0;
+    // 【2026-08-22】seq 缺口检测。「内容中间少几行、上下都在」这类故障靠
+    // 症状分不清是哪条路径丢的（背压主动丢帧 / 传输静默丢 / 渲染层），而
+    // seq 是服务端单调递增发的，缺号即丢帧且能定位到具体区间。
+    //
+    // 只在 prev>0（已建立记账）且真的跳号时上报，两个条件缺一不可：
+    //   - prev===0 是首帧或 seed 之后，此时跳号是正常的（服务端从快照 seq
+    //     之后开始发，客户端本来就没见过中间那些）；
+    //   - seq<=prev 是重发/乱序，不是缺口，且 attach 后必然出现一批。
+    if (prev > 0 && seq > prev + 1) {
+      for (const cb of this.gapCbs) cb({ sessionId, expected: prev + 1, got: seq, missing: seq - prev - 1 });
+    }
+    if (seq > prev) this.seen.set(sessionId, seq);
+    const f = { sessionId, seq, data };
+    for (const cb of this.outputCbs) cb(f);
+  }
+
   // 二进制帧分流：header.type 决定走哪条结算路径。rpcZip/rpcChunk 与 JSON 帧
   // 到达时走同一套 bytes-only handler（dispatch() 里的 fromB64 兼容垫层负责
   // 把旧 JSON 帧的 base64 先转好）；rpcBin 是纯二进制专属的新结算路径，因为
   // 它的 result 里带裸字节，没法回喂 dispatch() 的 JSON 解析。
   private dispatchBin(header: { type?: string }, blob: Uint8Array): void {
-    if (header.type === "rpcZip") {
+    if (header.type === "output") {
+      const h = header as { sessionId?: unknown; seq?: unknown };
+      if (typeof h.sessionId === "string" && typeof h.seq === "number") this.handleOutput(h.sessionId, h.seq, blob);
+    } else if (header.type === "rpcZip") {
       this.handleRpcZip({ id: (header as { id: string }).id, bytes: blob });
     } else if (header.type === "rpcChunk") {
       this.handleRpcChunk({ ...(header as { id: string; index: number; total: number; enc?: "gzip" }), bytes: blob });
@@ -914,7 +921,7 @@ export class Connection {
     // No frame while the transport is down either: flushAndRestore re-attaches
     // every bookkeeping entry on the next established connection.
     if (subscribed || !this.transportReady()) return;
-    this.send({ type: "attach", sessionId, lastSeq: seq });
+    this.send({ type: "attach", sessionId, lastSeq: seq, binOut: true });
   }
   sendInput(sessionId: string, data: Uint8Array): void {
     this.send({ type: "input", sessionId, data: toB64(data) });

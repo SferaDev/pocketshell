@@ -1,6 +1,6 @@
 // Wire protocol — authoritative subset for slice 1. Mirrors A3 §3.
-// `data` fields carry base64-encoded bytes (see bytes.ts). All frames are JSON
-// text; switching output to binary WS frames is a later-slice optimization.
+// `data` fields carry base64-encoded bytes (see bytes.ts). Frames are JSON text
+// unless a binary frame (binframe.ts) is negotiated, as for rpc and output.
 
 export type SessionState = "run" | "wait" | "done" | "idle";
 //  idle = 会话在 tmux 里存活，但本 Agent 未 attach（活动未知）
@@ -40,7 +40,8 @@ export interface Snippet {
 export interface Hint { id: string; text: string }
 
 export type ClientMsg =
-  | { type: "attach"; sessionId: string; lastSeq?: number }
+  // binOut: take output as binary frames (header {type,sessionId,seq}, raw bytes as blob).
+  | { type: "attach"; sessionId: string; lastSeq?: number; binOut?: boolean }
   // detach: unsubscribe from a session's output (fire-and-forget, no response).
   // Purely additive — old clients never send it and degrade to subscribe-only.
   | { type: "detach"; sessionId: string }
@@ -75,6 +76,7 @@ export type ClientMsg =
   | { type: "rpc"; id: string; method: string; params?: unknown; acceptEnc?: string[] };
 
 export type ServerMsg =
+  // Sent as a binary frame (header without `data`) once an attach carried binOut.
   | { type: "output"; sessionId: string; seq: number; data: string }
   // features: agent 支持的可选能力。客户端见到 "bin" 才开启二进制**上行**。
   //

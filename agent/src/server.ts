@@ -7,7 +7,7 @@ import type { ServerWebSocket } from "bun";
 import { loadConfig, type AgentConfig, resolveTlsMaterial, buildPairingString, resolveAdvertise } from "./config";
 import { TerminalService } from "./terminal";
 import { ShellService } from "./shell-service";
-import { ReplayService, tailWithinBudget, GAP_BACKFILL_BUDGET_BYTES } from "./replay";
+import { ReplayService, tailWithinBudget, GAP_BACKFILL_BUDGET_BYTES, type OutputFrame } from "./replay";
 import { OutputBatcher } from "./output-batcher";
 import { sweepTmp } from "./fs-service";
 import { RPC_FIT_SAFE_BYTES, RPC_CHUNK_PAYLOAD_BYTES, chunkRpcPayload } from "./rpc-fit";
@@ -101,7 +101,7 @@ interface Deps {
 // 这两个方法已经改成非二进制帧必抛（rpc-router.ts 的 blobOf），所以这个字段
 // **不是可选装饰，是让上传/保存不失败的必要前提**。两个 sessions 发送点
 // （广播 + listSessions 回复）共用同一个常量，防止两处各自维护漂移出偏差。
-const AGENT_FEATURES: string[] = ["bin"];
+const AGENT_FEATURES: string[] = ["bin", "binout"];
 
 // Unauthenticated sockets must finish the Noise handshake (or reach pairing) within this.
 const HANDSHAKE_TIMEOUT_MS = 10_000;
@@ -210,6 +210,8 @@ export function startServer(deps: Deps = {}) {
     // A6: sessions whose output frames were dropped for this conn while its
     // socket was backed up; each earns a resync once the buffer drains.
     needsResyncSessions: Set<string>;
+    // Set by an attach carrying binOut: output goes out as binary frames.
+    binOut: boolean;
   }
   const conns = new Map<ServerWebSocket<unknown>, Conn>();
   const deviceKey = (c: Conn): string => c.remoteStatic ?? "?";
@@ -244,6 +246,19 @@ export function startServer(deps: Deps = {}) {
   const sendBinSecure = (conn: Conn, header: object, blob: Uint8Array) => {
     if (!conn.ready) return;
     conn.ws.send(conn.channel.send(packBinFrame(header, blob)));
+  };
+
+  // Encodes a frame at most once per wire format, however many conns it fans out to.
+  const outputEncoder = (f: OutputFrame) => {
+    let bin: Uint8Array | undefined;
+    let json: Uint8Array | undefined;
+    return (conn: Conn): Uint8Array => conn.binOut
+      ? (bin ??= packBinFrame({ type: "output", sessionId: f.sessionId, seq: f.seq }, f.data))
+      : (json ??= new Uint8Array(Buffer.from(encode({ type: "output", sessionId: f.sessionId, seq: f.seq, data: toB64(f.data) }), "utf8")));
+  };
+  const sendOutput = (conn: Conn, plain: Uint8Array) => {
+    if (!conn.ready) return;
+    conn.ws.send(conn.channel.send(plain));
   };
 
   // Fan a message out to every connected device (mirrors the sessions/snippets
@@ -317,13 +332,13 @@ export function startServer(deps: Deps = {}) {
   // 进入丢弃状态时记一次，恢复（resync 发出）时把这一轮的帧数/字节数一起结算。
   const dropStats = new Map<string, { frames: number; bytes: number; since: number }>();
   const dropKey = (conn: Conn, id: string) => `${conn.remoteStatic ?? "?"}|${id}`;
-  const deliverOutput = (conn: Conn, msg: ServerMsg & { type: "output" }) => {
+  const deliverOutput = (conn: Conn, frame: OutputFrame, encodeFor: (conn: Conn) => Uint8Array) => {
     maybeResync(conn); // no-op unless the buffer has drained below low water
     if (conn.needsResyncSessions.size > 0 || bufferedAmount(conn) > HIGH_WATER_BYTES) {
       // Drop this frame for this conn only; replay still holds it, so a later
       // resync/reattach can backfill the hole.
-      conn.needsResyncSessions.add(msg.sessionId);
-      const k = dropKey(conn, msg.sessionId);
+      conn.needsResyncSessions.add(frame.sessionId);
+      const k = dropKey(conn, frame.sessionId);
       let st = dropStats.get(k);
       if (!st) {
         st = { frames: 0, bytes: 0, since: Date.now() };
@@ -331,22 +346,22 @@ export function startServer(deps: Deps = {}) {
         // 起始沿：立刻记一行，这样即使连接再没恢复过（结算行永远不来），日志里
         // 也留下了「这个会话在这个时刻开始丢帧」。
         diagLog({
-          tag: msg.sessionId, kind: "drop", phase: "start",
+          tag: frame.sessionId, kind: "drop", phase: "start",
           buffered: bufferedAmount(conn),
         });
       }
       st.frames++;
-      st.bytes += msg.data.length;
+      st.bytes += frame.data.byteLength;
       return;
     }
-    sendSecure(conn, msg);
+    sendOutput(conn, encodeFor(conn));
   };
   const batcher = new OutputBatcher((name, data) => {
     const frame = replay.ingest(name, data);
-    const msg = { type: "output", sessionId: name, seq: frame.seq, data: toB64(data) } as const;
+    const encodeFor = outputEncoder(frame);
     let delivered = false;
     for (const conn of conns.values()) {
-      if (conn.subscriptions.has(name)) { deliverOutput(conn, msg); delivered = true; }
+      if (conn.subscriptions.has(name)) { deliverOutput(conn, frame, encodeFor); delivered = true; }
     }
     // 【2026-08-28 投递盲区出声】pane 在产出、帧已进 replay，但没有任何连接
     // 订阅这个会话 = 字节被静默扣下（2026-08-26 的 rename bug 是它的一个
@@ -772,6 +787,7 @@ export function startServer(deps: Deps = {}) {
         catch (e) { sendSecure(conn, { type: "error", code: "rename_failed", message: String(e) }); }
         break;
       case "attach": {
+        if (msg.binOut === true) conn.binOut = true;
         conn.subscriptions.add(msg.sessionId);
         if (!shell.has(msg.sessionId)) terminal.noteUse(msg.sessionId, deviceKey(conn));
         // The replay backfill below is itself the resync for this conn, so any
@@ -784,7 +800,7 @@ export function startServer(deps: Deps = {}) {
         // replay.ts 的 GAP_BACKFILL_BUDGET_BYTES 注释）。**非 gap 路径一个字节
         // 都不能动**——那是正常的断线补齐，客户端不会重灌，少一帧就是真丢字节。
         const send = gap ? tailWithinBudget(frames, GAP_BACKFILL_BUDGET_BYTES) : frames;
-        for (const f of send) sendSecure(conn, { type: "output", sessionId: f.sessionId, seq: f.seq, data: toB64(f.data) });
+        for (const f of send) sendOutput(conn, outputEncoder(f)(conn));
         // attach 分支此前不打任何日志，整条「整环重放制造字节洪水」的根因链只能
         // 靠客户端埋点 + 数值指纹推断。这一行给出服务端直接佐证，也是验证上面
         // 限量是否生效的唯一依据。attach 只在重连/挂载时发生（重复 attach 被
@@ -951,7 +967,7 @@ export function startServer(deps: Deps = {}) {
 
   const onOpen = (ws: ServerWebSocket<unknown>, ip = "", factory = channelFactory) => {
     if (ip && config.rateLimiter.isLocked(ip)) { ws.close(); return; }
-    const conn: Conn = { ws, channel: factory(), ready: false, pending: false, remoteStatic: null, ip, subscriptions: new Set(), needsResyncSessions: new Set() };
+    const conn: Conn = { ws, channel: factory(), ready: false, pending: false, remoteStatic: null, ip, subscriptions: new Set(), needsResyncSessions: new Set(), binOut: false };
     conns.set(ws, conn);
     conn.handshakeTimer = setTimeout(() => { if (!conn.ready && !conn.pending) ws.close(); }, handshakeTimeoutMs);
     const m1 = conn.channel.start();

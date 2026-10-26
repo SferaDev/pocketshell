@@ -106,7 +106,7 @@ test("listSessions reply carries features:['bin'] so a fresh client knows upload
   while (ws.sent.length === 0 && Date.now() - start < 2000) await Bun.sleep(10);
   const reply = decodeServer(Buffer.from(ws.sent[0]).toString("utf8")) as any;
   expect(reply.type).toBe("sessions");
-  expect(reply.features).toEqual(["bin"]);
+  expect(reply.features).toEqual(["bin", "binout"]);
   srv.stop();
 });
 
@@ -479,7 +479,7 @@ test("periodicPush broadcasts the merged roster (incl. foreign idle sessions)", 
   expect(s.lastLine).toBe("$ vim");
   // Same regression as the listSessions test above, for the OTHER sessions
   // send site (the periodic broadcast) — the two must not drift apart.
-  expect(reply.features).toEqual(["bin"]);
+  expect(reply.features).toEqual(["bin", "binout"]);
   srv.stop();
 });
 

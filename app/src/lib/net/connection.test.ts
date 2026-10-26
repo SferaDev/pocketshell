@@ -721,7 +721,7 @@ test("tracks max seq per session and attaches with it", () => {
   ws.sent.length = 0; // clear all sent (including M1 + onEstablished frames)
   conn.attach("s1");
   // After clearing, first sent is the attach frame (channel is in transport, so sent directly)
-  expect(decodeMsg(ws.sent[0])).toEqual({ type: "attach", sessionId: "s1", lastSeq: 5 });
+  expect(decodeMsg(ws.sent[0])).toEqual({ type: "attach", sessionId: "s1", lastSeq: 5, binOut: true });
 });
 
 // ──────────────────────────────────────────────────────────────
@@ -794,8 +794,8 @@ test("re-attaches all attached sessions with lastSeq on reconnect", () => {
   advance(500);
   completeHandshake(created[1]);
   const msgs = businessSent(created[1]).map((b) => decodeMsg(b));
-  expect(msgs).toContainEqual({ type: "attach", sessionId: "s1", lastSeq: 3 });
-  expect(msgs).toContainEqual({ type: "attach", sessionId: "s2", lastSeq: 0 });
+  expect(msgs).toContainEqual({ type: "attach", sessionId: "s1", lastSeq: 3, binOut: true });
+  expect(msgs).toContainEqual({ type: "attach", sessionId: "s2", lastSeq: 0, binOut: true });
   expect(msgs.some((m: any) => m.type === "listSessions")).toBe(true);
   conn.dispose();
 });
@@ -982,7 +982,7 @@ test("detach sends a frame and removes the session from reconnect replay", () =>
   completeHandshake(created[1]);
   const msgs = businessSent(created[1]).map((b) => decodeMsg(b));
   expect(msgs.some((m: any) => m.type === "attach" && m.sessionId === "s1")).toBe(false);
-  expect(msgs).toContainEqual({ type: "attach", sessionId: "s2", lastSeq: 0 });
+  expect(msgs).toContainEqual({ type: "attach", sessionId: "s2", lastSeq: 0, binOut: true });
   conn.dispose();
 });
 
@@ -1033,7 +1033,7 @@ test("attach while offline is replayed exactly once on connect, with baseline la
   completeHandshake(ws);
   const msgs = businessSent(ws).map((b) => decodeMsg(b));
   const attaches = msgs.filter((m: any) => m.type === "attach" && m.sessionId === "s1");
-  expect(attaches).toEqual([{ type: "attach", sessionId: "s1", lastSeq: 7 }]);
+  expect(attaches).toEqual([{ type: "attach", sessionId: "s1", lastSeq: 7, binOut: true }]);
   conn.dispose();
 });
 
@@ -1072,7 +1072,7 @@ test("re-attach after detach resumes from the last received seq", () => {
   conn.detach("s1");
   ws.sent.length = 0;
   conn.attach("s1");
-  expect(decodeMsg(ws.sent[0])).toEqual({ type: "attach", sessionId: "s1", lastSeq: 9 });
+  expect(decodeMsg(ws.sent[0])).toEqual({ type: "attach", sessionId: "s1", lastSeq: 9, binOut: true });
   conn.dispose();
 });
 
@@ -1087,12 +1087,12 @@ test("seed attach after detach sends a frame and overwrites the retained seen va
 
   expect(h.sent.length).toBe(before + 1);
   const attach = decodeClient(new TextDecoder().decode(h.sent[h.sent.length - 1])) as any;
-  expect(attach).toEqual({ type: "attach", sessionId: "work", lastSeq: 4 });
+  expect(attach).toEqual({ type: "attach", sessionId: "work", lastSeq: 4, binOut: true });
 
   h.conn.detach("work");
   h.conn.attach("work");
   const resumed = decodeClient(new TextDecoder().decode(h.sent[h.sent.length - 1])) as any;
-  expect(resumed).toEqual({ type: "attach", sessionId: "work", lastSeq: 4 });
+  expect(resumed).toEqual({ type: "attach", sessionId: "work", lastSeq: 4, binOut: true });
 });
 
 // ──────────────────────────────────────────────────────────────
@@ -1771,5 +1771,44 @@ describe("会话重命名 —— 本地订阅账要跟服务端一起迁（2026-
     expect(a.length).toBe(2); // 没发出第二个 attach 的话，下面这条断言会空过
     expect(a[1]!.lastSeq).toBe(0);
     h.conn.dispose();
+  });
+});
+
+describe("binary output frames", () => {
+  it("attach opts in to binary output", () => {
+    const h = harness();
+    h.conn.attach("s1");
+    const att = decodeClient(new TextDecoder().decode(h.sent[h.sent.length - 1]));
+    expect(att).toEqual({ type: "attach", sessionId: "s1", lastSeq: 0, binOut: true });
+  });
+
+  it("delivers raw bytes and advances seq exactly like a JSON output frame", () => {
+    const h = harness();
+    const got: { sessionId: string; seq: number; data: number[] }[] = [];
+    const gaps: unknown[] = [];
+    h.conn.onOutput((f) => got.push({ sessionId: f.sessionId, seq: f.seq, data: [...f.data] }));
+    h.conn.onSeqGap((g) => gaps.push(g));
+    const raw = new Uint8Array([0x1b, 0x5b, 0xff, 0x00, 0xc3]); // not valid UTF-8
+    feedBytes(h, packBinFrame({ type: "output", sessionId: "s1", seq: 1 }, raw));
+    h.deliver({ type: "output", sessionId: "s1", seq: 2, data: toB64(new Uint8Array([65])) });
+    feedBytes(h, packBinFrame({ type: "output", sessionId: "s1", seq: 4 }, new Uint8Array([66])));
+    expect(got).toEqual([
+      { sessionId: "s1", seq: 1, data: [...raw] },
+      { sessionId: "s1", seq: 2, data: [65] },
+      { sessionId: "s1", seq: 4, data: [66] },
+    ]);
+    expect(gaps).toEqual([{ sessionId: "s1", expected: 3, got: 4, missing: 1 }]);
+    h.conn.attach("s1");
+    const att = decodeClient(new TextDecoder().decode(h.sent[h.sent.length - 1]));
+    expect(att).toMatchObject({ type: "attach", lastSeq: 4 });
+  });
+
+  it("drops a binary output frame with a malformed header", () => {
+    const h = harness();
+    const got: unknown[] = [];
+    h.conn.onOutput((f) => got.push(f));
+    feedBytes(h, packBinFrame({ type: "output", sessionId: 7, seq: 1 }, new Uint8Array([1])));
+    feedBytes(h, packBinFrame({ type: "output", sessionId: "s1" }, new Uint8Array([1])));
+    expect(got).toEqual([]);
   });
 });

@@ -8,6 +8,7 @@ import { encode, decodeServer } from "./protocol";
 import { ReplayService, GAP_BACKFILL_BUDGET_BYTES } from "./replay";
 import { TerminalService } from "./terminal";
 import { fromB64 } from "./bytes";
+import { unpackBinFrame, BIN_FRAME_MAGIC } from "./binframe";
 
 const M1 = new Uint8Array([1]);
 const M2 = new Uint8Array([2]);
@@ -464,4 +465,73 @@ test("诊断关闭时 sessions.features 不含 diag（客户端据此不采样�
   expect(await mk(true)).toContain("diag");
   // "bin" 两种情况下都必须在 —— 它不是诊断位，关掉诊断不能顺手把上传能力关了。
   expect(await mk(false)).toContain("bin");
+});
+
+// --- binary output frames ----------------------------------------------------
+
+const binOutputs = (ws: FakeWs) =>
+  ws.sent.filter((f) => f[0] === BIN_FRAME_MAGIC).map((f) => {
+    const bf = unpackBinFrame(f)!;
+    return { header: bf.header as { type: string; sessionId: string; seq: number }, data: [...bf.blob] };
+  });
+
+test("binout: an attach with binOut gets raw binary output frames, same seqs", () => {
+  const srv = startServer({ port: 0, channelFactory: passthroughResponder });
+  const ws = fakeWs();
+  openReady(srv, ws);
+  srv.__test.message(ws as any, utf8(encode({ type: "attach", sessionId: "s", binOut: true })));
+  ws.sent.length = 0;
+  const raw = new Uint8Array([0x1b, 0xff, 0x00, 0xc3]); // not valid UTF-8
+  srv.__test.emitOutput("s", raw);
+  srv.__test.emitOutput("s", b("cd"));
+  srv.__test.flushOutput("s");
+  expect(binOutputs(ws)).toEqual([
+    { header: { type: "output", sessionId: "s", seq: 1 }, data: [...raw] },
+    { header: { type: "output", sessionId: "s", seq: 2 }, data: [...b("cd")] },
+  ]);
+  expect(ws.sent.every((f) => f[0] === BIN_FRAME_MAGIC)).toBe(true);
+  srv.stop();
+});
+
+test("binout: a conn that never opted in keeps base64 JSON output alongside a binary one", () => {
+  const srv = startServer({ port: 0, channelFactory: passthroughResponder });
+  const oldWs = fakeWs();
+  const newWs = fakeWs();
+  openReady(srv, oldWs);
+  openReady(srv, newWs);
+  attach(srv, oldWs, "s");
+  srv.__test.message(newWs as any, utf8(encode({ type: "attach", sessionId: "s", binOut: true })));
+  newWs.sent.length = 0;
+  srv.__test.emitOutput("s", b("hi"));
+  const old = outputs(oldWs);
+  expect(old.length).toBe(1);
+  if (old[0].type === "output") {
+    expect(old[0].seq).toBe(1);
+    expect(Buffer.from(fromB64(old[0].data)).toString()).toBe("hi");
+  }
+  expect(binOutputs(newWs)).toEqual([{ header: { type: "output", sessionId: "s", seq: 1 }, data: [...b("hi")] }]);
+  srv.stop();
+});
+
+test("binout: attach backfill uses the negotiated format, with gap semantics unchanged", () => {
+  const replay = new ReplayService();
+  const srv = startServer({ port: 0, channelFactory: passthroughResponder, replay });
+  const ws = fakeWs();
+  openReady(srv, ws);
+  replay.ingest("s", b("one"));
+  replay.ingest("s", b("two"));
+  srv.__test.message(ws as any, utf8(encode({ type: "attach", sessionId: "s", lastSeq: 1, binOut: true })));
+  expect(binOutputs(ws)).toEqual([{ header: { type: "output", sessionId: "s", seq: 2 }, data: [...b("two")] }]);
+  srv.stop();
+});
+
+test("binout: the opt-in is per connection and survives later attaches without the flag", () => {
+  const srv = startServer({ port: 0, channelFactory: passthroughResponder });
+  const ws = fakeWs();
+  openReady(srv, ws);
+  srv.__test.message(ws as any, utf8(encode({ type: "attach", sessionId: "a", binOut: true })));
+  attach(srv, ws, "b");
+  srv.__test.emitOutput("b", b("x"));
+  expect(binOutputs(ws).map((f) => f.header.sessionId)).toEqual(["b"]);
+  srv.stop();
 });

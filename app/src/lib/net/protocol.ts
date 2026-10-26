@@ -37,7 +37,8 @@ export interface Snippet {
 export interface Hint { id: string; text: string }
 
 export type ClientMsg =
-  | { type: "attach"; sessionId: string; lastSeq?: number }
+  // binOut: take output as binary frames (header {type,sessionId,seq}, raw bytes as blob).
+  | { type: "attach"; sessionId: string; lastSeq?: number; binOut?: boolean }
   | { type: "detach"; sessionId: string }
   | { type: "input"; sessionId: string; data: string }
   | { type: "resize"; sessionId: string; cols: number; rows: number }
@@ -66,6 +67,7 @@ export type ClientMsg =
   | { type: "rpc"; id: string; method: string; params?: unknown; acceptEnc?: string[] };
 
 export type ServerMsg =
+  // Sent as a binary frame (header without `data`) once an attach carried binOut.
   | { type: "output"; sessionId: string; seq: number; data: string }
   // features: agent 支持的可选能力。客户端见到 "bin" 才开启二进制**上行**。
   //
