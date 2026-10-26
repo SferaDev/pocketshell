@@ -110,6 +110,9 @@
   let pendingKey: { id: string } | undefined; // byte key awaiting its deferred first shot
   let pendingRaf: number | undefined;
   const KEY_SWIPE_CANCEL_PX = 12;     // horizontal travel that reclassifies as a swipe
+  // Within a typing burst a panel swipe is unlikely, so keys skip the frame wait.
+  const KEY_BURST_MS = 600;
+  let lastShotAt = Number.NEGATIVE_INFINITY;
   // flick 的竖向阈值，上下同值。比横向取消阈值（12px）大，因为竖向要区分于
   // 「手指按下时的自然抖动」；实际手势通常滑 30px 以上。
   // **上下必须同值**：不对称会让人觉得某个方向「难触发」，手上很别扭。
@@ -143,7 +146,7 @@
   // affects the first shot — holding "a" with Shift armed types "Aaaa…".
   function fireKey(id: string) {
     const r = resolveKey(id, activeMods(mods));
-    if (r.kind === "bytes") onText(r.text);
+    if (r.kind === "bytes") { onText(r.text); lastShotAt = performance.now(); }
     else if (r.kind === "command") onCommand(r.command);
     mods = consumeAfterKey(mods);
   }
@@ -199,6 +202,12 @@
     if (up || down) {
       repeaters.delete(id);   // 这个键不用 repeater：既不首发也不连发
       pendingKey = undefined; // 也不走 deferred 首发那套记账
+      return;
+    }
+
+    if (performance.now() - lastShotAt < KEY_BURST_MS) {
+      pendingKey = undefined;
+      rep.start();
       return;
     }
 

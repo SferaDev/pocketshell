@@ -764,3 +764,46 @@ test("换位后 Tab 仍发 \\x09、Esc 仍发 \\x1b", async () => {
   await fireEvent.pointerUp(esc);
   expect(onText).toHaveBeenCalledWith("\x1b");
 });
+
+// Mid-burst keys go out on pointerdown; only the first key of a burst waits a
+// frame so a panel swipe starting on it can still cancel it.
+test("keys tab: a key pressed mid-burst is sent on pointerdown, without waiting a frame", async () => {
+  vi.useFakeTimers();
+  try {
+    const onText = vi.fn();
+    const { container } = render(Keyboard, { props: { onText, onCommand: vi.fn() } });
+    const q = container.querySelector('[data-key-id="q"]') as HTMLElement;
+    const w = container.querySelector('[data-key-id="w"]') as HTMLElement;
+    q.dispatchEvent(pointerEventXY("pointerdown", 100, 200));
+    expect(onText, "first key of a burst still waits for the frame").not.toHaveBeenCalled();
+    vi.advanceTimersByTime(16);
+    expect(onText).toHaveBeenCalledWith("q");
+    q.dispatchEvent(pointerEventXY("pointerup", 100, 200));
+    vi.advanceTimersByTime(200);
+    w.dispatchEvent(pointerEventXY("pointerdown", 100, 200));
+    expect(onText).toHaveBeenLastCalledWith("w");
+    w.dispatchEvent(pointerEventXY("pointerup", 100, 200));
+    expect(onText).toHaveBeenCalledTimes(2);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("keys tab: after a pause the next key waits a frame again, so a swipe can cancel it", async () => {
+  vi.useFakeTimers();
+  try {
+    const onText = vi.fn();
+    const { container } = render(Keyboard, { props: { onText, onCommand: vi.fn() } });
+    const q = container.querySelector('[data-key-id="q"]') as HTMLElement;
+    q.dispatchEvent(pointerEventXY("pointerdown", 100, 200));
+    q.dispatchEvent(pointerEventXY("pointerup", 100, 200));
+    expect(onText).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(2000);
+    q.dispatchEvent(pointerEventXY("pointerdown", 100, 200));
+    q.dispatchEvent(pointerEventXY("pointermove", 140, 200));
+    q.dispatchEvent(pointerEventXY("pointerup", 140, 200));
+    expect(onText).toHaveBeenCalledTimes(1);
+  } finally {
+    vi.useRealTimers();
+  }
+});
