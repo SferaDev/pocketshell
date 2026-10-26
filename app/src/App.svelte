@@ -1153,6 +1153,8 @@
         fontSize={settings.fontSize}
         fontFamily={settings.fontFamily}
         historyLines={settings.historyLines}
+        serverCols={s.cols}
+        serverRows={s.rows}
         onReady={(id, t) => terms.set(id, t)}
         onReseedReady={(id, fn) => recoveryRequests.set(id, fn)}
       />

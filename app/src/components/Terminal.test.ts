@@ -290,6 +290,34 @@ test("overflow while hidden in the alt buffer triggers term.redraw on activation
   expect(historyCalls()).toBe(h0); // no capture-pane reseed in the alt buffer
 });
 
+// An alt-screen pane resumed after its stream was detached: the snapshot would
+// land in the normal buffer, so the app repaints in place with one redraw.
+test("resuming a detached alt-screen tab repaints in place instead of writing the snapshot", async () => {
+  const conn = stubConn();
+  const { rerender } = render(TerminalView, { props: propsFor(conn, true) });
+  await settleMount(conn);
+  const term = termInstances().at(-1)!;
+  conn.rpc.mockImplementation(async (method: string) => {
+    if (method === "term.paneInfo") return { currentCommand: "vim", alternateOn: true, isShell: false };
+    if (method === "term.history") return { data: toB64(new TextEncoder().encode("SNAPSHOT\n")), seq: 42 };
+    return {};
+  });
+  const redraws = () => conn.rpc.mock.calls.filter((c) => c[0] === "term.redraw").length;
+  await rerender(propsFor(conn, false));
+  await rerender(propsFor(conn, true));
+  await waitFor(() => expect(redraws()).toBe(1));
+  term.setBuffer("alternate");
+
+  await rerender({ ...propsFor(conn, false), streaming: false });
+  expect(conn.detach).toHaveBeenCalledWith("s1");
+  await rerender(propsFor(conn, true));
+  await waitFor(() => expect(conn.attach).toHaveBeenCalledWith("s1", 42, { seed: true }));
+  await waitFor(() => expect(redraws()).toBe(2));
+  await new Promise((r) => setTimeout(r, 20));
+  expect(redraws()).toBe(2);
+  expect(term.written.some((c) => typeof c === "string" && c.includes("SNAPSHOT"))).toBe(false);
+});
+
 // Drain the microtask queue: Svelte flushes $effects + the activation
 // microtask (refit + startPoll) there, and the stub RPCs resolve there too.
 const flushMicro = async (n = 20) => { for (let i = 0; i < n; i++) await Promise.resolve(); };

@@ -90,6 +90,7 @@
   import { kickRenderDebouncer } from "../lib/term/render-kick";
   import { snapshotWritePump, kickWritePump } from "../lib/term/write-pump";
   import { isMeasurable, isPlausible, rememberDims, shouldDeferShrink, SHRINK_HOLD_MS } from "../lib/term/fit-guard";
+  import { shouldForceActivationResize } from "../lib/term/activation-resize";
   import {
     buildReseedPayload, buildReseedReport, ReseedGate, concatReseedWrite, normalizeReseedRows,
     historyExpectBytes, reseedLines, seedRetryDelayMs, SEED_MAX_ATTEMPTS, type ReseedTrigger,
@@ -112,6 +113,8 @@
     fontSize = 14,
     fontFamily = "maple-mono",
     historyLines = DEFAULT_SETTINGS.historyLines,
+    serverCols = 0,
+    serverRows = 0,
     onReady,
     onReseedReady,
   }: {
@@ -124,6 +127,9 @@
     fontFamily?: FontId;
     /** 重灌历史拉多少行。全量 2000 行在真机上要七秒，见 lib/term/history-decode.ts。 */
     historyLines?: number;
+    /** The tmux window size the agent last reported for this session. */
+    serverCols?: number;
+    serverRows?: number;
     onReady?: (sessionId: string, term: Terminal) => void;
     onReseedReady?: (sessionId: string, reseed: (t: ReseedTrigger) => void) => void;
   } = $props();
@@ -169,9 +175,8 @@
   // (A4 — only the active, live session polls tmux).
   let startPoll: () => void = () => {};
   let stopPoll: () => void = () => {};
-  // Same lifecycle as refit: forces a resize resend on activation even when this
-  // device's xterm dims are unchanged (需求2 — re-assert THIS device's size on a
-  // shared tmux session another device resized), then redraws to fill it.
+  // Same lifecycle as refit: on activation, re-sends this device's size when the
+  // agent reports another size for the shared tmux window (需求2).
   let activateRefit: () => void = () => {};
   // 【2026-08-24】resize 埋点的触发源。用户报告「终端在输出的时候我没有进行任何
   // 操作」却出现内容错乱，而 ResizeObserver 不需要用户操作就会触发（软键盘、
@@ -742,6 +747,7 @@
     // size actually differs.
     let lastSentCols = 0;
     let lastSentRows = 0;
+    let lastForcedResizeAt = Number.NEGATIVE_INFINITY;
     // 行数收缩迟滞的状态（2026-08-25，「中间丢行」的根因，详见 fit-guard.ts 末节）。
     // 一次变矮先不应用，压 SHRINK_HOLD_MS 再复量；`confirmingShrink` 标记这一次
     // 复量必须放行，否则持续偏小的尺寸会被无限期推迟。
@@ -1281,8 +1287,21 @@
         && gen === recoveryGeneration && activeGen === activeGeneration
         && active === activeAtStart;
       try {
-        const snapshot = await loadHistorySnapshot(historyLines);
+        // An alt-screen app is repainted in place: the snapshot would land in
+        // the normal buffer and hide its screen until the next poll redraws it.
+        const altPane = appliedMode === "alt" && currentBuffer === "alternate";
+        const pending = loadHistorySnapshot(historyLines);
+        // Sent after the history request, so the repaint lands after its seq.
+        if (altPane) void conn.rpc("term.redraw", { session: sessionId }).catch(() => {});
+        const snapshot = await pending;
         if (!resumeIsCurrent()) { queueOfflineRetry(); return; }
+        if (altPane) {
+          needsReseed = reseedQueued;
+          seeding = false;
+          failedRecovery = null;
+          conn.attach(sessionId, snapshot.seq, { seed: true });
+          return;
+        }
         await new Promise<void>((resolve) => {
           // Snapshot decoding/preparation may yield. Re-check immediately next
           // to the atomic RIS write, not only when the RPC first resolves.
@@ -1427,17 +1446,21 @@
     };
 
     activateRefit = () => {
-      // 需求2: bypass the R3 suppression guard so conn.resize goes out on every
-      // activation. If the shared tmux window already matches this device the
-      // agent no-ops (SIGWINCH only fires on a real size change); if another
-      // device shrank it, this pulls it back and tmux repaints via the live
-      // stream. No explicit reseed here — that would clear+redraw on every tab
-      // switch (and double-reseed the dirty-stash case that flushPending handles).
-      // 激活必发一次 resize（见上），所以它在日志里天然高频 —— 单独标记，
-      // 免得把「没人操作却 resize」这个真正要找的信号淹掉。
+      // 需求2: bypass the R3 suppression guard only when another device may own
+      // the shared tmux window; otherwise refit sends just a real size change.
+      // 激活触发的 resize 单独标记，免得把「没人操作却 resize」这个真正要找的信号淹掉。
       refitWhy = "activate";
-      lastSentCols = -1;
-      lastSentRows = -1;
+      const now = Date.now();
+      if (shouldForceActivationResize({
+        server: { cols: serverCols, rows: serverRows },
+        lastSent: { cols: lastSentCols, rows: lastSentRows },
+        lastForcedAt: lastForcedResizeAt,
+        now,
+      })) {
+        lastForcedResizeAt = now;
+        lastSentCols = -1;
+        lastSentRows = -1;
+      }
       refit();
     };
 
