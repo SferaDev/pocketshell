@@ -335,7 +335,7 @@ Issues and pull requests are welcome.
 4. Push the branch (`git push origin feat/your-feature`)
 5. Open a Pull Request
 
-Protocol changes start in the backend at `agent/src/protocol.ts`; `app/src/lib/protocol.ts` is its verbatim mirror. `bun test` and `bun run typecheck` must pass on both sides.
+Protocol changes start in the backend at `agent/src/protocol.ts`; `app/src/lib/protocol.ts` is its verbatim mirror. `bun run test` and `bun run typecheck` must pass on both sides.
 
 ## 📄 License
 

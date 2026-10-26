@@ -10,7 +10,7 @@
   "type": "module",
   "scripts": {
     "start": "bun run src/server.ts",
-    "test": "bun test",
+    "test": "sh scripts/isolated-test.sh",
     "typecheck": "tsc --noEmit",
     "gen:embedded": "bun run scripts/gen-embedded.ts",
     "build:bin": "bun run scripts/build-bin.ts",

@@ -70,7 +70,7 @@ jobs:
       # No --quiet / --reporter override: bun test prints the "N pass / N fail"
       # summary, which is used as the regression baseline.
       - name: Test
-        run: bun test
+        run: bun run test
 
       # agent/ gained a typecheck script only after a dead-code bug (the A6
       # backpressure path read a `bufferedAmount` property Bun's ServerWebSocket
