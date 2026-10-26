@@ -1022,7 +1022,7 @@ export function startServer(deps: Deps = {}) {
           conn.ready = true;
           if (conn.remoteStatic) config.registry.touch(conn.remoteStatic, conn.ip);
           config.audit.log({ event: "handshake_ok", pub: conn.remoteStatic, ip: conn.ip });
-          console.log("[pocketshell] connect (authorized)");
+          console.log(`[pocketshell] ${new Date().toISOString()} connect (authorized)`);
         }
       }
       return;
@@ -1076,7 +1076,7 @@ export function startServer(deps: Deps = {}) {
   };
 
   const tlsMaterial = resolveTlsMaterial(config.keyDir, config.tls);
-  const onClose = (ws: ServerWebSocket<unknown>): void => {
+  const onClose = (ws: ServerWebSocket<unknown>, code?: number, reason?: string): void => {
     const conn = conns.get(ws);
     conns.delete(ws);
     if (conn) { clearTimeout(conn.handshakeTimer); clearTimeout(conn.pairTimer); }
@@ -1086,7 +1086,7 @@ export function startServer(deps: Deps = {}) {
       previewTokens.revokeDevice(conn.remoteStatic);
       notifyPresence.delete(conn.remoteStatic);
     }
-    console.log("[pocketshell] disconnect");
+    console.log(`[pocketshell] ${new Date().toISOString()} disconnect code=${code ?? "?"}${reason ? ` reason=${reason}` : ""}`);
   };
   const server = Bun.serve({
     hostname: config.listen.host,
@@ -1211,7 +1211,7 @@ export function startServer(deps: Deps = {}) {
     websocket: {
       maxPayloadLength: WS_MAX_PAYLOAD_BYTES,
       open(ws) { onOpen(ws, (ws as any).remoteAddress ?? ""); },
-      close(ws) { onClose(ws); },
+      close(ws, code, reason) { onClose(ws, code, reason); },
       message(ws, raw) { onMessage(ws, raw as any); },
       // Socket drained after backpressure: recover any dropped-output sessions.
       drain(ws) { const conn = conns.get(ws); if (conn) maybeResync(conn); },
