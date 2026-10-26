@@ -107,6 +107,7 @@ const defaultTmuxAsync: AsyncTmuxRunner = async (args) => {
 };
 
 const SCAN_INTERVAL_MS = 1000;
+const CLIENT_ACTIVITY_MARGIN_S = 1;
 
 export class TerminalService {
   private sessions = new Map<string, Live>();
@@ -125,6 +126,11 @@ export class TerminalService {
   // ensure, rename, ...).
   private tmuxAsync: AsyncTmuxRunner;
   private pinned = new Map<string, Set<string>>();
+  // Last real phone use per session, and each device's last known size, for last-device-wins sizing.
+  private phoneUse = new Map<string, { at: number; device: string }>();
+  private phoneSizes = new Map<string, Map<string, { cols: number; rows: number }>>();
+  private yielded = new Set<string>();
+  private clock: () => number;
   private scanning = false;
   private disposed = false;
   // 【2026-08-27 通道看门狗】B2 通道某一环瞬时阻塞（cat 不退出、tmux 不报错、
@@ -143,7 +149,8 @@ export class TerminalService {
   // locale (see ensure() for why this must land on the server, not the client).
   private langFallback: string | null;
 
-  constructor(deps: { tmux?: TmuxRunner; tmuxAsync?: AsyncTmuxRunner; langFallback?: string | null } = {}) {
+  constructor(deps: { tmux?: TmuxRunner; tmuxAsync?: AsyncTmuxRunner; langFallback?: string | null; now?: () => number } = {}) {
+    this.clock = deps.now ?? Date.now;
     this.tmux = deps.tmux ?? defaultTmux;
     // Tests that inject only the sync fake get it wrapped, keeping the async
     // probe paths hermetic; production (no injected runner) gets real
@@ -262,6 +269,7 @@ export class TerminalService {
       this.reap(name, 0);
     }
     await this.watchdogTick(now);
+    await this.arbitrateWindows();
     for (const { name, inferred } of probes) {
       if (!this.sessions.has(name)) continue; // killed/renamed while probing
       let m = this.states.get(name);
@@ -660,6 +668,13 @@ export class TerminalService {
     return ch;
   }
 
+  private dropWindowState(name: string): void {
+    this.pinned.delete(name);
+    this.yielded.delete(name);
+    this.phoneUse.delete(name);
+    this.phoneSizes.delete(name);
+  }
+
   // resize-window leaves window-size=manual on the window; remember which windows we pinned.
   private markPinned(name: string): void {
     const res = this.tmux(["display-message", "-p", "-t", name, "#{window_id}"]);
@@ -667,6 +682,40 @@ export class TerminalService {
     const targets = this.pinned.get(name) ?? new Set<string>();
     targets.add(id || name);
     this.pinned.set(name, targets);
+    this.yielded.delete(name);
+  }
+
+  // Stamp a real phone use (input, resize, attach, activation); re-pin at the device's size if we yielded.
+  noteUse(name: string, device: string, size?: { cols: number; rows: number }): void {
+    if (!this.sessions.has(name)) return;
+    this.phoneUse.set(name, { at: this.clock(), device });
+    const sizes = this.phoneSizes.get(name) ?? new Map<string, { cols: number; rows: number }>();
+    if (size) sizes.set(device, size);
+    this.phoneSizes.set(name, sizes);
+    if (size || !this.yielded.has(name)) return;
+    const last = sizes.get(device);
+    if (last) this.resize(name, last.cols, last.rows);
+  }
+
+  // A backgrounded phone must not hold windows it was the last to use.
+  releaseDevice(device: string): void {
+    for (const [name, use] of [...this.phoneUse]) if (use.device === device) this.releaseWindow(name);
+  }
+
+  // Last device used wins: yield a pinned window once a real tmux client was active after the phone.
+  async arbitrateWindows(): Promise<void> {
+    for (const name of [...this.pinned.keys()]) {
+      try {
+        const use = this.phoneUse.get(name);
+        if (!use) continue;
+        const res = await this.tmuxAsync(["list-clients", "-t", name, "-F", "#{client_activity}"]);
+        if (res.exitCode !== 0) continue;
+        const latest = new TextDecoder().decode(res.stdout).split("\n")
+          .map((l) => Number.parseInt(l, 10)).filter((n) => Number.isFinite(n))
+          .reduce((a, b) => Math.max(a, b), 0);
+        if (latest > Math.floor(use.at / 1000) + CLIENT_ACTIVITY_MARGIN_S) this.releaseWindow(name);
+      } catch { /* never throw from the scanner */ }
+    }
   }
 
   // Hand the windows we pinned back to tmux's own sizing. Idempotent; a gone session is fine.
@@ -674,6 +723,7 @@ export class TerminalService {
     const targets = this.pinned.get(name);
     if (!targets) return;
     this.pinned.delete(name);
+    this.yielded.add(name);
     for (const t of targets) this.tmux(["set-option", "-uw", "-t", t, "window-size"]);
   }
 
@@ -711,7 +761,7 @@ export class TerminalService {
     live?.pty.kill();
     this.sessions.delete(name);
     this.states.delete(name);
-    this.pinned.delete(name);
+    this.dropWindowState(name);
     for (const cb of this.exitCbs) cb(name, code);
     this.emitSessionsChange();
   }
@@ -840,7 +890,7 @@ export class TerminalService {
     live?.pty.kill();
     this.sessions.delete(name);
     this.states.delete(name);
-    this.pinned.delete(name);
+    this.dropWindowState(name);
     this.tmux(["kill-session", "-t", name]);
     this.emitSessionsChange();
   }
@@ -870,6 +920,12 @@ export class TerminalService {
     const pinnedTargets = this.pinned.get(name);
     this.pinned.delete(name);
     if (pinnedTargets) this.pinned.set(newName, pinnedTargets);
+    for (const m of [this.phoneUse, this.phoneSizes] as Map<string, unknown>[]) {
+      const v = m.get(name);
+      m.delete(name);
+      if (v !== undefined) m.set(newName, v);
+    }
+    if (this.yielded.delete(name)) this.yielded.add(newName);
     const m = this.states.get(name);
     this.states.delete(name);
     if (m) this.states.set(newName, m);

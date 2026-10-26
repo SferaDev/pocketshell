@@ -1178,3 +1178,35 @@ test("window pin: socket close of the only viewer releases the window", () => {
   expect(calls).toContainEqual(["set-option", "-uw", "-t", "@7", "window-size"]);
   srv.stop();
 });
+
+test("window pin: phone input re-pins and a backgrounded presence releases", () => {
+  const calls: string[][] = [];
+  const okr = (s = "") => ({ exitCode: 0, stdout: utf8(s), stderr: new Uint8Array() });
+  const terminal = new TerminalService({
+    tmux: (args) => { calls.push(args); return args[0] === "display-message" ? okr("@7\n") : okr(); },
+  });
+  const registry = loadDeviceRegistry(tmpRegFile());
+  registry.add("PHONEPUB", "iPhone");
+  const cfg: any = {
+    identity: { publicKey: new Uint8Array(32), secretKey: new Uint8Array(32) },
+    authorizedKeys: [], replayBufferBytes: 4096,
+    registry, pairing: null, pairingMode: false,
+    listen: { host: "127.0.0.1", port: 0 }, workspaceRoot: ".", tls: { enabled: false },
+    rateLimiter: noopLimiter(), audit: noopAudit(), keyDir: tmpKeyDir(),
+  };
+  const srv = startServer({ port: 0, config: cfg, channelFactory: stubResponder("PHONEPUB", false), terminal });
+  const ws = fakeWs();
+  srv.__test.open(ws as any);
+  srv.__test.message(ws as any, M1);
+  terminal.ensure("work", { cols: 80, rows: 24 });
+  const send = (msg: object) => srv.__test.message(ws as any, utf8(encode(msg as any)));
+  send({ type: "attach", sessionId: "work" });
+  send({ type: "resize", sessionId: "work", cols: 72, rows: 35 });
+  calls.length = 0;
+  send({ type: "presence", foreground: false, activeSessionId: null });
+  expect(calls).toContainEqual(["set-option", "-uw", "-t", "@7", "window-size"]);
+  calls.length = 0;
+  send({ type: "input", sessionId: "work", data: "bHM=" });
+  expect(calls).toContainEqual(["resize-window", "-t", "work", "-x", "72", "-y", "35"]);
+  srv.stop();
+});

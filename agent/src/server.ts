@@ -212,6 +212,7 @@ export function startServer(deps: Deps = {}) {
     needsResyncSessions: Set<string>;
   }
   const conns = new Map<ServerWebSocket<unknown>, Conn>();
+  const deviceKey = (c: Conn): string => c.remoteStatic ?? "?";
   // Give the tmux window back to real clients once no device subscribes to the session.
   const releaseIfUnviewed = (name: string): void => {
     for (const c of conns.values()) if (c.subscriptions.has(name)) return;
@@ -772,6 +773,7 @@ export function startServer(deps: Deps = {}) {
         break;
       case "attach": {
         conn.subscriptions.add(msg.sessionId);
+        if (!shell.has(msg.sessionId)) terminal.noteUse(msg.sessionId, deviceKey(conn));
         // The replay backfill below is itself the resync for this conn, so any
         // pending backpressure-resync flag for the session is stale.
         conn.needsResyncSessions.delete(msg.sessionId);
@@ -815,7 +817,10 @@ export function startServer(deps: Deps = {}) {
         c.n++; c.bytes += data.length;
         inputRecv.set(msg.sessionId, c);
         if (shell.has(msg.sessionId)) shell.write(msg.sessionId, data);
-        else terminal.write(msg.sessionId, data);
+        else {
+          terminal.noteUse(msg.sessionId, deviceKey(conn));
+          terminal.write(msg.sessionId, data);
+        }
         break;
       }
       case "resize":
@@ -825,7 +830,10 @@ export function startServer(deps: Deps = {}) {
         // 丢弃而非夹取：夹到 20 列照样污染，保住上一次的正确尺寸才是对的。
         if (!isSaneSize(msg.cols, msg.rows)) break;
         if (shell.has(msg.sessionId)) shell.resize(msg.sessionId, msg.cols, msg.rows);
-        else terminal.resize(msg.sessionId, msg.cols, msg.rows);
+        else {
+          terminal.noteUse(msg.sessionId, deviceKey(conn), { cols: msg.cols, rows: msg.rows });
+          terminal.resize(msg.sessionId, msg.cols, msg.rows);
+        }
         break;
       case "kill":
         if (shell.has(msg.sessionId)) shell.kill(msg.sessionId);
@@ -835,6 +843,8 @@ export function startServer(deps: Deps = {}) {
       case "presence":
         if (conn.remoteStatic) {
           notifyPresence.set(conn.remoteStatic, { pubKey: conn.remoteStatic, foreground: msg.foreground, activeSessionId: msg.activeSessionId });
+          if (!msg.foreground) terminal.releaseDevice(conn.remoteStatic);
+          else if (msg.activeSessionId && !shell.has(msg.activeSessionId)) terminal.noteUse(msg.activeSessionId, conn.remoteStatic);
         }
         break;
       case "listDevices": {

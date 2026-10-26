@@ -591,6 +591,131 @@ test.skipIf(!hasTmux)("releaseWindow() returns window-size to unset on a real tm
   }
 }, 15000);
 
+function sharedWindow(clientActivity: () => string) {
+  let t = 100_000;
+  const calls: string[][] = [];
+  const term = new TerminalService({
+    now: () => t,
+    tmux: (args) => { calls.push(args); return args[0] === "display-message" ? ok("@3\n") : ok(); },
+    tmuxAsync: async (args) => {
+      calls.push(args);
+      return args[0] === "list-clients" ? ok(clientActivity()) : ok();
+    },
+  });
+  term.ensure("work", { cols: 80, rows: 24 });
+  const phone = { cols: 72, rows: 35 };
+  term.noteUse("work", "phoneA", phone);
+  term.resize("work", phone.cols, phone.rows);
+  calls.length = 0;
+  return { term, calls, advance: (ms: number) => { t += ms; } };
+}
+const releases = (calls: string[][]) => calls.filter((a) => a[0] === "set-option").length;
+const repins = (calls: string[][]) => calls.filter((a) => a[0] === "resize-window");
+
+test("arbitrate: a real client active after the phone releases the window", async () => {
+  let act = "";
+  const { term, calls, advance } = sharedWindow(() => act);
+  act = "100\n";
+  await term.arbitrateWindows();
+  expect(releases(calls)).toBe(0);
+  advance(5000);
+  act = "105\n99\n";
+  await term.arbitrateWindows();
+  expect(calls).toContainEqual(["list-clients", "-t", "work", "-F", "#{client_activity}"]);
+  expect(calls).toContainEqual(["set-option", "-uw", "-t", "@3", "window-size"]);
+  term.dispose();
+});
+
+test("arbitrate: activity within the margin of phone use does not release", async () => {
+  const { term, calls } = sharedWindow(() => "101\n");
+  await term.arbitrateWindows();
+  expect(releases(calls)).toBe(0);
+  term.dispose();
+});
+
+test("arbitrate: no real clients keeps the window pinned and tolerates errors", async () => {
+  const { term, calls } = sharedWindow(() => "");
+  await term.arbitrateWindows();
+  expect(releases(calls)).toBe(0);
+  (term as any).tmuxAsync = async () => { throw new Error("boom"); };
+  await expect(term.arbitrateWindows()).resolves.toBeUndefined();
+  term.dispose();
+});
+
+test("arbitrate: only pinned windows are probed", async () => {
+  const { term, calls } = sharedWindow(() => "");
+  term.releaseWindow("work");
+  calls.length = 0;
+  await term.arbitrateWindows();
+  expect(calls).toEqual([]);
+  term.dispose();
+});
+
+test("phone input after a release re-pins at the stored size", async () => {
+  const { term, calls, advance } = sharedWindow(() => "200\n");
+  await term.arbitrateWindows();
+  expect(releases(calls)).toBe(1);
+  calls.length = 0;
+  advance(1000);
+  term.noteUse("work", "phoneA");
+  expect(repins(calls)).toContainEqual(["resize-window", "-t", "work", "-x", "72", "-y", "35"]);
+  term.dispose();
+});
+
+test("passive output and an unused session do not re-pin", async () => {
+  const { term, calls } = sharedWindow(() => "200\n");
+  await term.arbitrateWindows();
+  calls.length = 0;
+  (term as any).sessions.get("work").lastOutputAt = Date.now();
+  await term.arbitrateWindows();
+  expect(repins(calls)).toEqual([]);
+  term.dispose();
+});
+
+test("releaseDevice yields only the windows that device used last", () => {
+  const { term, calls, advance } = sharedWindow(() => "");
+  advance(1000);
+  term.noteUse("work", "phoneB", { cols: 50, rows: 20 });
+  term.releaseDevice("phoneA");
+  expect(releases(calls)).toBe(0);
+  term.releaseDevice("phoneB");
+  expect(releases(calls)).toBe(1);
+  term.dispose();
+});
+
+test("several phones: the one that used the session last gets its size back", async () => {
+  const { term, calls, advance } = sharedWindow(() => "200\n");
+  advance(1000);
+  term.noteUse("work", "phoneB", { cols: 50, rows: 20 });
+  await term.arbitrateWindows();
+  calls.length = 0;
+  advance(1000);
+  term.noteUse("work", "phoneA");
+  expect(repins(calls)).toContainEqual(["resize-window", "-t", "work", "-x", "72", "-y", "35"]);
+  await term.arbitrateWindows();
+  advance(1000);
+  term.noteUse("work", "phoneB");
+  expect(repins(calls).at(-1)).toEqual(["resize-window", "-t", "work", "-x", "50", "-y", "20"]);
+  term.dispose();
+});
+
+test.skipIf(!hasTmux)("arbitrate: a phone-only session with no real clients stays pinned on a real tmux server", async () => {
+  const svc = new TerminalService();
+  const NAME = uniqueSessionName("arb");
+  try {
+    svc.ensure(NAME, { cols: 80, rows: 24 });
+    svc.noteUse(NAME, "phone", { cols: 72, rows: 35 });
+    svc.resize(NAME, 72, 35);
+    await svc.arbitrateWindows();
+    const out = Bun.spawnSync(["tmux", "show-options", "-wv", "-t", NAME, "window-size"]).stdout;
+    expect(new TextDecoder().decode(out).trim()).toBe("manual");
+  } finally {
+    await svc.kill(NAME);
+    svc.dispose();
+    killSession(NAME);
+  }
+}, 15000);
+
 test("redraw() 对未持有的会话返回 false（没有尺寸可抖）", () => {
   const term = new TerminalService({ tmux: () => ok() });
   expect(term.redraw("never-ensured")).toEqual({ ok: false });
