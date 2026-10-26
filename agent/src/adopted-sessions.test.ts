@@ -17,7 +17,7 @@ const res = (code: number, out = "") => ({ exitCode: code, stdout: enc(out), std
 function fake(alive: Set<string>, calls: string[][] = []): TmuxRunner {
   return (args) => {
     calls.push(args);
-    const t = args[args.indexOf("-t") + 1];
+    const t = args[args.indexOf("-t") + 1].replace(/^=|:$/g, "");
     if (args.includes("has-session")) return res(alive.has(t) ? 0 : 1);
     if (args.includes("new-session")) { alive.add(args[args.indexOf("-s") + 1]); return res(0); }
     if (args.includes("kill-session")) { alive.delete(t); return res(0); }

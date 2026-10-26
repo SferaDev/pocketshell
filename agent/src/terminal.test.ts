@@ -39,7 +39,7 @@ export function fakeTmux(
     // Match by subcommand, not args[0]: real calls prefix a global `-u` flag.
     if (args.includes("list-sessions")) return map.list != null ? ok(map.list) : fail();
     if (args.includes("capture-pane")) {
-      const name = args[args.indexOf("-t") + 1];
+      const name = args[args.indexOf("-t") + 1].replace(/^=|:$/g, "");
       return ok(map.capture?.[name] ?? "");
     }
     if (args.includes("has-session")) return ok();
@@ -101,7 +101,7 @@ test("rename() renames a foreign (non-owned) session instead of no-op", () => {
   const term = new TerminalService({ tmux: fakeTmux({ list: "" }, calls) });
   term.rename("old", "shiny");
   term.dispose();
-  expect(calls).toContainEqual(["rename-session", "-t", "old", "shiny"]);
+  expect(calls).toContainEqual(["rename-session", "-t", "=old", "shiny"]);
 });
 
 test("history() exports full pane scrollback + visible area with colours (base64)", async () => {
@@ -117,7 +117,7 @@ test("history() exports full pane scrollback + visible area with colours (base64
   const r = await term.history("work", 0);
   expect(Buffer.from(r.data, "base64").toString("utf8")).toBe("\x1b[36mLINE_1\x1b[39m\nLINE_2");
   const cap = calls.find((a) => a.includes("capture-pane"))!;
-  expect(cap).toEqual(["-u", "capture-pane", "-e", "-p", "-J", "-S", "-", "-E", "-", "-t", "work"]);
+  expect(cap).toEqual(["-u", "capture-pane", "-e", "-p", "-J", "-S", "-", "-E", "-", "-t", "=work:"]);
   term.dispose();
 });
 
@@ -134,7 +134,7 @@ test("history() 透传调用方给的 seq，并保持 capture 参数不变", asy
   expect(r.seq).toBe(42);
   expect(Buffer.from(r.data, "base64").toString("utf8")).toBe("\x1b[36mLINE_1\x1b[39m\nLINE_2");
   const cap = calls.find((a) => a.includes("capture-pane"))!;
-  expect(cap).toEqual(["-u", "capture-pane", "-e", "-p", "-J", "-S", "-", "-E", "-", "-t", "work"]);
+  expect(cap).toEqual(["-u", "capture-pane", "-e", "-p", "-J", "-S", "-", "-E", "-", "-t", "=work:"]);
   term.dispose();
 });
 
@@ -158,7 +158,7 @@ test("history(lines) 只取最近 N 行 —— 走 capture 的 back 参数解析
   // -S = cursor_y - back = 20 - 1000；-E = **可视区底部**，随后由 withCursorFix
   // 补一条 CUP 把光标摆回 tmux 的 (x,y)。只取到光标行会截掉它下方的内容
   // （TUI 的边框/状态栏就在那里），且光标会停在视口底部 —— 见 withCursorFix。
-  expect(cap).toEqual(["-u", "capture-pane", "-e", "-p", "-J", "-S", "-980", "-E", "-", "-t", "work"]);
+  expect(cap).toEqual(["-u", "capture-pane", "-e", "-p", "-J", "-S", "-980", "-E", "-", "-t", "=work:"]);
   term.dispose();
 });
 
@@ -169,7 +169,7 @@ test("history() 不给 lines 时保持全量 -S -（老调用方语义不变）"
   });
   await term.history("work", 0, undefined);
   const cap = calls.find((a) => a.includes("capture-pane"))!;
-  expect(cap).toEqual(["-u", "capture-pane", "-e", "-p", "-J", "-S", "-", "-E", "-", "-t", "work"]);
+  expect(cap).toEqual(["-u", "capture-pane", "-e", "-p", "-J", "-S", "-", "-E", "-", "-t", "=work:"]);
   term.dispose();
 });
 
@@ -202,7 +202,7 @@ test("capture() 默认不带 -e —— 复制路径要纯文本，不能夹 SGR 
   expect(Buffer.from(r.data, "base64").toString("utf8")).toBe("PLAIN_1\nPLAIN_2");
   const cap = calls.find((a) => a.includes("capture-pane"))!;
   expect(cap).not.toContain("-e");
-  expect(cap).toEqual(["-u", "capture-pane", "-p", "-J", "-S", "-", "-E", "-", "-t", "work"]);
+  expect(cap).toEqual(["-u", "capture-pane", "-p", "-J", "-S", "-", "-E", "-", "-t", "=work:"]);
   term.dispose();
 });
 
@@ -213,7 +213,7 @@ test("capture({colors:true}) 才加 -e —— 首屏 seed 仍要颜色", async (
   });
   await term.capture("work", { colors: true });
   const cap = calls.find((a) => a.includes("capture-pane"))!;
-  expect(cap).toEqual(["-u", "capture-pane", "-e", "-p", "-J", "-S", "-", "-E", "-", "-t", "work"]);
+  expect(cap).toEqual(["-u", "capture-pane", "-e", "-p", "-J", "-S", "-", "-E", "-", "-t", "=work:"]);
   term.dispose();
 });
 
@@ -454,7 +454,7 @@ test("history() 仍是带颜色的全量 capture（委托 capture 后行为不�
   const r = await term.history("work", 9);
   expect(r.seq).toBe(9);
   const cap = calls.find((a) => a.includes("capture-pane"))!;
-  expect(cap).toEqual(["-u", "capture-pane", "-e", "-p", "-J", "-S", "-", "-E", "-", "-t", "work"]);
+  expect(cap).toEqual(["-u", "capture-pane", "-e", "-p", "-J", "-S", "-", "-E", "-", "-t", "=work:"]);
   term.dispose();
 });
 
@@ -479,7 +479,7 @@ test("paneInfo() reports mouse reporting flags from tmux", async () => {
   expect(await term.paneInfo("cc")).toEqual({
     currentCommand: "claude", alternateOn: true, isShell: false, mouseOn: true, mouseSgr: true,
   });
-  const call = calls.find((a) => a[0] === "display-message" && a.includes("cc"))!;
+  const call = calls.find((a) => a[0] === "display-message" && a.includes("=cc:"))!;
   expect(call).toBeDefined();
   expect(call[4]).toContain("#{mouse_any_flag}|#{mouse_sgr_flag}");
   term.dispose();
@@ -527,8 +527,8 @@ test("redraw() 抖动窗口尺寸让程序自己重绘（不再依赖 attach 客
   expect(await term.redraw("work")).toEqual({ ok: true });
   const resizes = calls.filter((a) => a[0] === "resize-window");
   expect(resizes.length).toBe(2);
-  expect(resizes[0]).toEqual(["resize-window", "-t", "work", "-x", "79", "-y", "24"]);
-  expect(resizes[1]).toEqual(["resize-window", "-t", "work", "-x", "80", "-y", "24"]);
+  expect(resizes[0]).toEqual(["resize-window", "-t", "=work:", "-x", "79", "-y", "24"]);
+  expect(resizes[1]).toEqual(["resize-window", "-t", "=work:", "-x", "80", "-y", "24"]);
   // 防回潮：不得再去碰 attach 客户端
   expect(calls.some((a) => a.includes("refresh-client"))).toBe(false);
   term.dispose();
@@ -592,8 +592,8 @@ test("resize() issues one resize-window and looks the window id up once per sess
   term.resize("work", 72, 35);
   term.resize("work", 70, 30);
   expect(calls.filter((a) => a[0] === "resize-window")).toEqual([
-    ["resize-window", "-t", "work", "-x", "72", "-y", "35"],
-    ["resize-window", "-t", "work", "-x", "70", "-y", "30"],
+    ["resize-window", "-t", "=work:", "-x", "72", "-y", "35"],
+    ["resize-window", "-t", "=work:", "-x", "70", "-y", "30"],
   ]);
   expect(calls.filter((a) => a[0] === "display-message")).toEqual([]);
   term.dispose();
@@ -703,7 +703,7 @@ test("phone input after a release re-pins at the stored size", async () => {
   calls.length = 0;
   advance(1000);
   term.noteUse("work", "phoneA");
-  expect(repins(calls)).toContainEqual(["resize-window", "-t", "work", "-x", "72", "-y", "35"]);
+  expect(repins(calls)).toContainEqual(["resize-window", "-t", "=work:", "-x", "72", "-y", "35"]);
   term.dispose();
 });
 
@@ -736,11 +736,11 @@ test("several phones: the one that used the session last gets its size back", as
   calls.length = 0;
   advance(1000);
   term.noteUse("work", "phoneA");
-  expect(repins(calls)).toContainEqual(["resize-window", "-t", "work", "-x", "72", "-y", "35"]);
+  expect(repins(calls)).toContainEqual(["resize-window", "-t", "=work:", "-x", "72", "-y", "35"]);
   await term.arbitrateWindows();
   advance(1000);
   term.noteUse("work", "phoneB");
-  expect(repins(calls).at(-1)).toEqual(["resize-window", "-t", "work", "-x", "50", "-y", "20"]);
+  expect(repins(calls).at(-1)).toEqual(["resize-window", "-t", "=work:", "-x", "50", "-y", "20"]);
   term.dispose();
 });
 
@@ -864,7 +864,7 @@ test("list() runs per-session capture probes concurrently (not serially)", async
       return ok("a\t1700000000\t80\t24\nb\t1700000001\t80\t24\nc\t1700000002\t80\t24\n");
     }
     if (args.includes("capture-pane")) {
-      started.push(args[args.indexOf("-t") + 1]);
+      started.push(args[args.indexOf("-t") + 1].replace(/^=|:$/g, ""));
       return new Promise<TmuxResult>((res) => {
         resolvers.push(() => res(ok("line")));
         // Safety net: even a regressed (serial) implementation completes, so
@@ -968,7 +968,7 @@ test("scan: one roster query covers every owned session; a missing one is confir
   roster = rosterLine("a") + rosterLine("c");
   calls.length = 0;
   await (term as any).scanAsync();
-  expect(calls.filter((a) => a.includes("has-session"))).toEqual([["has-session", "-t", "b"]]);
+  expect(calls.filter((a) => a.includes("has-session"))).toEqual([["has-session", "-t", "=b"]]);
   expect(exits).toEqual(["b"]);
   term.dispose();
 });
@@ -983,7 +983,7 @@ test("scan: a failed roster query falls back to per-session has-session", async 
   });
   plant(term, "a");
   await (term as any).scanAsync();
-  expect(calls.filter((a) => a.includes("has-session"))).toEqual([["has-session", "-t", "a"]]);
+  expect(calls.filter((a) => a.includes("has-session"))).toEqual([["has-session", "-t", "=a"]]);
   term.dispose();
 });
 
@@ -1297,9 +1297,9 @@ test("构造时把所有 pane_pipe=1 的会话的管子关掉（pane_pipe=0 的�
   await Bun.sleep(20);
   term.dispose();
   const offs = calls.filter((a) => a[0] === "pipe-pane");
-  expect(offs).toContainEqual(["pipe-pane", "-t", "piped"]);
-  expect(offs).toContainEqual(["pipe-pane", "-t", "中文名"]);
-  expect(offs).not.toContainEqual(["pipe-pane", "-t", "clean"]);
+  expect(offs).toContainEqual(["pipe-pane", "-t", "=piped:"]);
+  expect(offs).toContainEqual(["pipe-pane", "-t", "=中文名:"]);
+  expect(offs).not.toContainEqual(["pipe-pane", "-t", "=clean:"]);
   // 关管子必须是「不带命令」的那种（带命令 = 又开一根）
   for (const a of offs) expect(a).not.toContain("-O");
   // 名字要能认出 CJK —— 没有 -u 时 tmux 会把它洗成 _
@@ -1402,4 +1402,12 @@ test("onSize reports our own resizes and each scan's window size for owned sessi
   await (term as any).scanAsync();
   expect(sizes).toEqual([["a", 41, 20], ["a", 80, 24]]);
   term.dispose();
+});
+
+test("targets a numerically named session exactly, never a window index of another session", () => {
+  const calls: string[][] = [];
+  const term = new TerminalService({ tmux: (args) => { calls.push(args); return ok(); } });
+  term.kill("0");
+  term.dispose();
+  expect(calls).toContainEqual(["kill-session", "-t", "=0"]);
 });

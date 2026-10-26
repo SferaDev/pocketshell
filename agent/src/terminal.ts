@@ -10,6 +10,7 @@ import { cjkFallbackLang } from "./pty-env";
 import type { SessionMeta, TermHistoryResult } from "./protocol";
 import { loadAdopted, saveAdopted } from "./adopted-store";
 import { CONTROL_SESSION, TmuxControl } from "./tmux-control";
+import { paneTarget, sessionTarget } from "./tmux-target";
 
 // Sanity bound for capture()'s `back`. Generous next to tmux's default
 // history-limit (2000) so a legitimate anchor is never rejected, small enough
@@ -217,7 +218,7 @@ export class TerminalService {
         if (!name || piped !== "1" || name === CONTROL_SESSION) continue;
         // A restored session already opened its own pipe; closing it here would silence it.
         if (this.sessions.has(name)) continue;
-        await this.tmuxAsync(["pipe-pane", "-t", name]);
+        await this.tmuxAsync(["pipe-pane", "-t", paneTarget(name)]);
       }
     } catch { /* 没有 tmux / 没有会话：启动路径不因此失败 */ }
   }
@@ -263,11 +264,11 @@ export class TerminalService {
   }
 
   private hasSession(name: string): boolean {
-    return this.tmux(["has-session", "-t", name]).exitCode === 0;
+    return this.tmux(["has-session", "-t", sessionTarget(name)]).exitCode === 0;
   }
 
   private async hasSessionAsync(name: string): Promise<boolean> {
-    return (await this.tmuxAsync(["has-session", "-t", name])).exitCode === 0;
+    return (await this.tmuxAsync(["has-session", "-t", sessionTarget(name)])).exitCode === 0;
   }
 
   // Recompute run/wait for live sessions; fire onSessionsChange only when a
@@ -370,7 +371,7 @@ export class TerminalService {
       const known = rows?.get(name)?.historySize;
       if (silentMs >= 5000 && known !== undefined) historySize = known;
       else if (silentMs >= 5000) {
-        const r = await this.tmuxAsync(["display-message", "-p", "-t", name, "#{history_size}"]);
+        const r = await this.tmuxAsync(["display-message", "-p", "-t", paneTarget(name), "#{history_size}"]);
         if (r.exitCode === 0) {
           const n = Number(new TextDecoder().decode(r.stdout).trim());
           historySize = Number.isFinite(n) ? n : null;
@@ -414,7 +415,7 @@ export class TerminalService {
   // locale and sanitizes non-ASCII / control bytes to `_`, which would corrupt
   // CJK previews. Same locale issue as attach()/roster(); keep `-u`.
   private async captureLastLine(name: string): Promise<string> {
-    const res = await this.tmuxAsync(["-u", "capture-pane", "-p", "-t", name]);
+    const res = await this.tmuxAsync(["-u", "capture-pane", "-p", "-t", paneTarget(name)]);
     if (res.exitCode !== 0) return "";
     const lines = new TextDecoder()
       .decode(res.stdout)
@@ -551,7 +552,7 @@ export class TerminalService {
       // history goes; ask it, and fall back to the full capture if the query
       // fails (dead pane, missing tmux).
       const q = await this.tmuxAsync([
-        "display-message", "-p", "-t", name, "#{cursor_x}|#{cursor_y}|#{history_size}",
+        "display-message", "-p", "-t", paneTarget(name), "#{cursor_x}|#{cursor_y}|#{history_size}",
       ]);
       // 严格解析：空字段不能当 0。`Number("")` 是 0，回复少一个字段就会被读成
       // 「光标在 (0,0)」，于是往快照尾巴上补一条 `ESC[1;1H` 把光标扔到左上角
@@ -582,7 +583,7 @@ export class TerminalService {
     }
     const args = ["-u", "capture-pane"];
     if (opts?.colors) args.push("-e");
-    args.push("-p", "-J", "-S", from, "-E", to, "-t", name);
+    args.push("-p", "-J", "-S", from, "-E", to, "-t", paneTarget(name));
     const res = await this.tmuxAsync(args);
     if (res.exitCode !== 0) return { data: "", atTop: true };
     // 只有重灌（history）那条路径补光标定位。**复制/导出路径绝不能补**：
@@ -620,7 +621,7 @@ export class TerminalService {
   async scrollbackLines(name: string, n: number): Promise<string[]> {
     const lines = Math.max(1, Math.min(2000, Math.floor(n)));
     const res = await this.tmuxAsync([
-      "-u", "capture-pane", "-p", "-S", `-${lines}`, "-E", "-1", "-t", name,
+      "-u", "capture-pane", "-p", "-S", `-${lines}`, "-E", "-1", "-t", paneTarget(name),
     ]);
     if (res.exitCode !== 0) return [];
     const text = new TextDecoder().decode(res.stdout);
@@ -630,7 +631,7 @@ export class TerminalService {
   }
 
   async visibleLines(name: string): Promise<string[]> {
-    const res = await this.tmuxAsync(["-u", "capture-pane", "-p", "-t", name]);
+    const res = await this.tmuxAsync(["-u", "capture-pane", "-p", "-t", paneTarget(name)]);
     if (res.exitCode !== 0) return [];
     const text = new TextDecoder().decode(res.stdout);
     // capture-pane 的输出以 \n 结尾，split 后末尾会多一个空串；去掉它，
@@ -651,7 +652,7 @@ export class TerminalService {
     mouseSgr: boolean;
   }> {
     const res = await this.tmuxAsync([
-      "display-message", "-p", "-t", name,
+      "display-message", "-p", "-t", paneTarget(name),
       "#{pane_current_command}|#{alternate_on}|#{mouse_any_flag}|#{mouse_sgr_flag}",
     ]);
     if (res.exitCode !== 0) {
@@ -694,8 +695,8 @@ export class TerminalService {
     if (!live) return { ok: false };
     const { cols, rows } = live.meta;
     if (cols <= 1) return { ok: false };
-    const a = await this.tmuxAsync(["resize-window", "-t", name, "-x", String(cols - 1), "-y", String(rows)]);
-    const b = await this.tmuxAsync(["resize-window", "-t", name, "-x", String(cols), "-y", String(rows)]);
+    const a = await this.tmuxAsync(["resize-window", "-t", paneTarget(name), "-x", String(cols - 1), "-y", String(rows)]);
+    const b = await this.tmuxAsync(["resize-window", "-t", paneTarget(name), "-x", String(cols), "-y", String(rows)]);
     this.markPinned(name);
     return { ok: a.exitCode === 0 && b.exitCode === 0 };
   }
@@ -704,7 +705,7 @@ export class TerminalService {
   // Used by the file panel's "set project root to focused tab" button. `-u`
   // forces UTF-8 so CJK path segments aren't sanitized under a C locale.
   async pwd(name: string): Promise<{ pwd: string }> {
-    const res = await this.tmuxAsync(["-u", "display-message", "-p", "-t", name, "#{pane_current_path}"]);
+    const res = await this.tmuxAsync(["-u", "display-message", "-p", "-t", paneTarget(name), "#{pane_current_path}"]);
     if (res.exitCode !== 0) return { pwd: "" };
     return { pwd: new TextDecoder().decode(res.stdout).trim() };
   }
@@ -743,7 +744,7 @@ export class TerminalService {
   private markPinned(name: string): void {
     let id = this.windowIds.get(name);
     if (id === undefined) {
-      const res = this.tmux(["display-message", "-p", "-t", name, "#{window_id}"]);
+      const res = this.tmux(["display-message", "-p", "-t", paneTarget(name), "#{window_id}"]);
       id = res.exitCode === 0 ? new TextDecoder().decode(res.stdout).trim() : "";
       if (id) this.windowIds.set(name, id);
     }
@@ -986,7 +987,7 @@ export class TerminalService {
     this.states.delete(name);
     this.dropWindowState(name);
     this.persistAdopted();
-    this.tmux(["kill-session", "-t", name]);
+    this.tmux(["kill-session", "-t", sessionTarget(name)]);
     if (this.sessions.size === 0) this.control?.close();
     this.emitSessionsChange();
   }
@@ -995,7 +996,7 @@ export class TerminalService {
     const live = this.sessions.get(name);
     if (!live) {
       // Foreign (non-owned) session: rename directly; next list() reflects it.
-      const res = this.tmux(["rename-session", "-t", name, newName]);
+      const res = this.tmux(["rename-session", "-t", sessionTarget(name), newName]);
       if (res.exitCode !== 0) {
         throw new Error(
           `tmux rename-session failed for "${name}": ${new TextDecoder().decode(res.stderr)}`,
@@ -1004,7 +1005,7 @@ export class TerminalService {
       this.emitSessionsChange();
       return;
     }
-    const res = this.tmux(["rename-session", "-t", name, newName]);
+    const res = this.tmux(["rename-session", "-t", sessionTarget(name), newName]);
     if (res.exitCode !== 0) {
       throw new Error(
         `tmux rename-session failed for "${name}": ${new TextDecoder().decode(res.stderr)}`,

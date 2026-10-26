@@ -88,7 +88,7 @@ describe("PaneChannel —— 与 tmux 的交互", () => {
     const pipe = s.calls.find((c) => c[0] === "pipe-pane");
     expect(pipe).toBeDefined();
     expect(pipe).toContain("-O");
-    expect(pipe).toContain("dev");
+    expect(pipe).toContain("=dev:");
     ch.kill();
   });
 
@@ -98,7 +98,7 @@ describe("PaneChannel —— 与 tmux 的交互", () => {
     ch.write(new TextEncoder().encode("你"));
     await Bun.sleep(10);
     const send = s.calls.find((c) => c[0] === "send-keys");
-    expect(send).toEqual(["send-keys", "-H", "-t", "dev", "e4", "bd", "a0"]);
+    expect(send).toEqual(["send-keys", "-H", "-t", "=dev:", "e4", "bd", "a0"]);
     ch.kill();
   });
 
@@ -130,7 +130,7 @@ describe("PaneChannel —— 与 tmux 的交互", () => {
     const ch = new PaneChannel("dev", { tmux: s.tmux, tmuxAsync: s.tmuxAsync, runDir: mkdir() });
     s.calls.length = 0;
     ch.kill();
-    expect(s.calls[0]).toEqual(["pipe-pane", "-t", "dev"]); // 不带 -O = 关闭
+    expect(s.calls[0]).toEqual(["pipe-pane", "-t", "=dev:"]); // 不带 -O = 关闭
   });
 
   it("kill 之后不再发任何命令", async () => {
@@ -149,7 +149,7 @@ describe("PaneChannel —— 与 tmux 的交互", () => {
     const ch = new PaneChannel("dev", { tmux: s.tmux, tmuxAsync: s.tmuxAsync, runDir: mkdir() });
     s.calls.length = 0;
     ch.resize(100, 40);
-    expect(s.calls).toContainEqual(["resize-window", "-t", "dev", "-x", "100", "-y", "40"]);
+    expect(s.calls).toContainEqual(["resize-window", "-t", "=dev:", "-x", "100", "-y", "40"]);
     ch.kill();
   });
 

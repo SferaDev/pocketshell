@@ -1207,6 +1207,6 @@ test("window pin: phone input re-pins and a backgrounded presence releases", () 
   expect(calls).toContainEqual(["set-option", "-uw", "-t", "@7", "window-size"]);
   calls.length = 0;
   send({ type: "input", sessionId: "work", data: "bHM=" });
-  expect(calls).toContainEqual(["resize-window", "-t", "work", "-x", "72", "-y", "35"]);
+  expect(calls).toContainEqual(["resize-window", "-t", "=work:", "-x", "72", "-y", "35"]);
   srv.stop();
 });

@@ -165,7 +165,7 @@ test("history() keeps a small scrollback to a single full-window capture", async
   expect(Buffer.from(r.data, "base64").toString("utf8")).toBe("line1\nline2\n");
   const caps = calls.filter((a) => a.includes("capture-pane"));
   expect(caps).toHaveLength(1);
-  expect(caps[0]).toEqual(["-u", "capture-pane", "-e", "-p", "-J", "-S", "-", "-E", "-", "-t", "work"]);
+  expect(caps[0]).toEqual(["-u", "capture-pane", "-e", "-p", "-J", "-S", "-", "-E", "-", "-t", "=work:"]);
 });
 
 test("history() returns the full oversize scrollback in ONE capture (rpc chunking carries the size)", async () => {
@@ -176,7 +176,7 @@ test("history() returns the full oversize scrollback in ONE capture (rpc chunkin
   // WP-1's halving retries are gone: a single -S - capture, all 2000 lines.
   const caps = calls.filter((a) => a.includes("capture-pane"));
   expect(caps).toHaveLength(1);
-  expect(caps[0]).toEqual(["-u", "capture-pane", "-e", "-p", "-J", "-S", "-", "-E", "-", "-t", "work"]);
+  expect(caps[0]).toEqual(["-u", "capture-pane", "-e", "-p", "-J", "-S", "-", "-E", "-", "-t", "=work:"]);
   const data = Buffer.from(r.data, "base64").toString("utf8");
   expect(data).toBe(("l".repeat(100) + "\n").repeat(2000));
 });

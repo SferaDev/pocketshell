@@ -36,6 +36,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { PtyHandle } from "./pty";
 import type { AsyncTmuxRunner, TmuxRunner } from "./terminal";
+import { paneTarget } from "./tmux-target";
 
 // 单次 send-keys 的字节上限。实测 4096 通过、16384 报 `command too long`，
 // 取一半留余量（不同 tmux 构建的 argv 上限不同，这里不赌边界）。
@@ -134,7 +135,7 @@ export class PaneChannel implements PtyHandle {
     const sink = tapDir
       ? `tee -a '${join(tapDir, fifoName(this.session))}.raw' > '${this.fifoPath}'`
       : `cat > '${this.fifoPath}'`;
-    this.deps.tmux(["pipe-pane", "-O", "-t", this.session, sink]);
+    this.deps.tmux(["pipe-pane", "-O", "-t", paneTarget(this.session), sink]);
   }
 
   onData(cb: (chunk: Uint8Array) => void): void {
@@ -182,7 +183,7 @@ export class PaneChannel implements PtyHandle {
       })}`);
     }
     for (const chunk of parts) {
-      const args = ["send-keys", "-H", "-t", this.session, ...hexArgs(chunk)];
+      const args = ["send-keys", "-H", "-t", paneTarget(this.session), ...hexArgs(chunk)];
       // 串行化：前一块 resolve 之后才发下一块，保证字节顺序。
       // 用 async runner 是必须的 —— 同步 spawn 会阻塞事件循环，一次 20KB 粘贴
       // 就会把**所有其他会话**的输出冻住几百毫秒（history() 头部有同样的告诫）。
@@ -207,7 +208,7 @@ export class PaneChannel implements PtyHandle {
 
   resize(cols: number, rows: number): void {
     if (this.closed) return;
-    void this.deps.tmuxAsync(["resize-window", "-t", this.session, "-x", String(cols), "-y", String(rows)]);
+    void this.deps.tmuxAsync(["resize-window", "-t", paneTarget(this.session), "-x", String(cols), "-y", String(rows)]);
   }
 
   /** 把读进程的 stdout 抽干并分发。读进程退出即通道失效（正常情况下它不会退出）。 */
@@ -242,7 +243,7 @@ export class PaneChannel implements PtyHandle {
   kill(): void {
     if (this.closed) return;
     // 先关 tmux 侧的管子，再关我们这侧，否则 cat 会拿到 SIGPIPE 写进 tmux 日志。
-    this.deps.tmux(["pipe-pane", "-t", this.session]);
+    this.deps.tmux(["pipe-pane", "-t", paneTarget(this.session)]);
     this.closeIo();
   }
 }
