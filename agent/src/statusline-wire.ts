@@ -9,9 +9,10 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
-import type { WireResult } from "./notify-wire";
+import { guardedCmd, isOurCmd, type WireResult } from "./notify-wire";
 
-const statuslineCmd = (agentBin: string) => `${agentBin} statusline`;
+const statuslineCmd = (agentBin: string) => guardedCmd(agentBin, "statusline");
+const isOurStatusline = (agentBin: string, command: unknown) => isOurCmd(agentBin, "statusline", command);
 
 /** 用户原有的 statusLine 配置。command 必有，其余字段原样保留以便还原。 */
 export interface ChainRecord {
@@ -40,7 +41,7 @@ export function wireStatusline(settingsPath: string, chainPath: string, agentBin
 
   // 幂等的要害在这个判断：已经是我们的就绝不再存 chain，否则重复接线会把
   // 我们自己存成「用户原命令」，解除接线时还原出一个指向自己的死循环。
-  if (cur && typeof cur.command === "string" && cur.command !== ours) {
+  if (cur && typeof cur.command === "string" && !isOurStatusline(agentBin, cur.command)) {
     try {
       mkdirSync(dirname(chainPath), { recursive: true });
       writeFileSync(chainPath, JSON.stringify(cur, null, 2), { mode: 0o600 });
@@ -61,9 +62,8 @@ export function unwireStatusline(settingsPath: string, chainPath: string, agentB
   try { root = JSON.parse(readFileSync(settingsPath, "utf8")); }
   catch (e) { return { ok: false, reason: "parse_error", detail: String(e) }; }
 
-  const ours = statuslineCmd(agentBin);
   // 用户后来自己改成了别的：那是他的选择，不要动。只清理我们的 chain。
-  if (root.statusLine?.command === ours) {
+  if (isOurStatusline(agentBin, root.statusLine?.command)) {
     const chain = readChain(chainPath);
     if (chain) root.statusLine = chain;
     else delete root.statusLine;

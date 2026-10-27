@@ -2,11 +2,12 @@ import { expect, test } from "bun:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
-import { wireClaude, unwireClaude, wireCodex, unwireCodex, wireOpencode, unwireOpencode, wireKimi, unwireKimi, codexNotifyChainPath, readCodexNotifyChain } from "./notify-wire";
+import { homedir } from "node:os";
+import { guardedCmd, wireClaude, unwireClaude, wireCodex, unwireCodex, wireOpencode, unwireOpencode, wireKimi, unwireKimi, codexNotifyChainPath, readCodexNotifyChain } from "./notify-wire";
 
 const KIMI_MARK_LITERAL = "# pocketshell-notify";
 const bin = "/usr/local/bin/pocketshell-agent";
-const cmd = `${bin} notify claude`;
+const cmd = guardedCmd(bin, "notify claude");
 
 const NOTIF_MATCHER = "permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input";
 const ourCount = (j: any, event: string) =>
@@ -42,6 +43,7 @@ test("wire migrates the old matcher-less Notification entry and legacy command",
   const f = join(dir, "settings.json");
   writeFileSync(f, JSON.stringify({ hooks: { Notification: [
     { matcher: "", hooks: [{ type: "command", command: cmd }] },
+    { matcher: "", hooks: [{ type: "command", command: `${bin} notify claude` }] },
     { matcher: "", hooks: [{ type: "command", command: `${bin} notify` }] },
     { matcher: "", hooks: [{ type: "command", command: "user-notify" }] },
   ] } }));
@@ -53,6 +55,20 @@ test("wire migrates the old matcher-less Notification entry and legacy command",
   ]);
   expect(ourCount(j, "Stop")).toBe(1);
   expect(ourCount(j, "PreToolUse")).toBe(1);
+});
+
+test("wire writes a $HOME-relative guarded command and recognises a dotfiles copy of it", () => {
+  const homeBin = join(homedir(), ".local/bin/pocketshell-agent");
+  const guarded = '[ -x "$HOME/.local/bin/pocketshell-agent" ] && "$HOME/.local/bin/pocketshell-agent" notify claude; exit 0';
+  expect(guardedCmd(homeBin, "notify claude")).toBe(guarded);
+  const dir = mkdtempSync(join(tmpdir(), "cc-"));
+  const f = join(dir, "settings.json");
+  writeFileSync(f, JSON.stringify({ hooks: {
+    Stop: [{ hooks: [{ type: "command", command: guarded }] }, { hooks: [{ type: "command", command: `${homeBin} notify claude` }] }],
+  } }));
+  wireClaude(f, homeBin);
+  const j = JSON.parse(readFileSync(f, "utf8"));
+  expect(j.hooks.Stop).toEqual([{ hooks: [{ type: "command", command: guarded }] }]);
 });
 
 test("unwire removes our entries from all events and drops empty ones", () => {

@@ -3,16 +3,26 @@
 // a structured {ok:false, reason, detail} the UI surfaces — no silent failure.
 import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync, chmodSync } from "node:fs";
 import { dirname, join as joinPath } from "node:path";
+import { homedir } from "node:os";
 
 export interface WireResult { ok: boolean; reason?: string; detail?: string; }
 
 // ---- claude code ----
 // 新版命令把工具名作为参数带进去，这样 notify 子命令才知道该读哪个落盘文件。
 // 同时兼容旧版 `pocketshell-agent notify`：wire/unwire 都会把旧命令清理掉。
-const notifyCmd = (agentBin: string) => `${agentBin} notify claude`;
-const oldNotifyCmd = (agentBin: string) => `${agentBin} notify`;
+// settings.json is synced across machines as a dotfile, so the command we write
+// is $HOME-relative and a no-op where the agent is not installed.
+export function guardedCmd(agentBin: string, sub: string): string {
+  const home = homedir();
+  const bin = agentBin.startsWith(home + "/") ? "$HOME" + agentBin.slice(home.length) : agentBin;
+  return `[ -x "${bin}" ] && "${bin}" ${sub}; exit 0`;
+}
+export const isOurCmd = (agentBin: string, sub: string, command: unknown) =>
+  command === guardedCmd(agentBin, sub) || command === `${agentBin} ${sub}`;
+
+const notifyCmd = (agentBin: string) => guardedCmd(agentBin, "notify claude");
 const isOurNotifyCmd = (agentBin: string, command: string) =>
-  command === notifyCmd(agentBin) || command === oldNotifyCmd(agentBin);
+  isOurCmd(agentBin, "notify claude", command) || isOurCmd(agentBin, "notify", command);
 
 // Stop = turn finished; PreToolUse/AskUserQuestion = interview question; the
 // Notification matcher keeps only "needs you" types (idle_prompt is covered by Stop).

@@ -2,10 +2,11 @@ import { expect, test } from "bun:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { guardedCmd } from "./notify-wire";
 import { wireStatusline, unwireStatusline, readChain } from "./statusline-wire";
 
 const bin = "/usr/local/bin/pocketshell-agent";
-const ourCmd = `${bin} statusline`;
+const ourCmd = guardedCmd(bin, "statusline");
 
 function fx(seed?: unknown) {
   const dir = mkdtempSync(join(tmpdir(), "sl-"));
@@ -43,6 +44,13 @@ test("wire 幂等：重复接线不会把自己包进 chain", () => {
   wireStatusline(settings, chain, bin);
   wireStatusline(settings, chain, bin);
   expect(readChain(chain)?.command).toBe("~/my-bar.sh"); // 仍是最初那个，没被自己覆盖
+  expect(JSON.parse(readFileSync(settings, "utf8")).statusLine.command).toBe(ourCmd);
+});
+
+test("wire never chains our own unguarded legacy command", () => {
+  const { settings, chain } = fx({ statusLine: { type: "command", command: `${bin} statusline` } });
+  wireStatusline(settings, chain, bin);
+  expect(existsSync(chain)).toBe(false);
   expect(JSON.parse(readFileSync(settings, "utf8")).statusLine.command).toBe(ourCmd);
 });
 
